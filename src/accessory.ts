@@ -11,6 +11,7 @@ export class KumoThermostatAccessory {
   private siteId: string;
   private currentStatus: DeviceStatus | null = null;
   private pollIntervalMs: number;
+  private hasHumiditySensor: boolean = false;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -54,10 +55,6 @@ export class KumoThermostatAccessory {
       .onGet(this.getTemperatureDisplayUnits.bind(this))
       .onSet(this.setTemperatureDisplayUnits.bind(this));
 
-    // Optional: Add humidity characteristic if available
-    this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
-      .onGet(this.getCurrentRelativeHumidity.bind(this));
-
     // Start polling for status updates
     this.startPolling();
   }
@@ -95,6 +92,25 @@ export class KumoThermostatAccessory {
         this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${zone.adapter.roomTemp}`);
         this.platform.log.debug('Zone adapter data:', JSON.stringify(zone.adapter));
         return;
+      }
+
+      // Check if device has humidity sensor and register characteristic if needed
+      const hasHumidity = zone.adapter.humidity !== null && zone.adapter.humidity !== undefined;
+      if (hasHumidity && !this.hasHumiditySensor) {
+        // Device has humidity sensor - add the characteristic
+        this.hasHumiditySensor = true;
+        this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
+          .onGet(this.getCurrentRelativeHumidity.bind(this));
+        this.platform.log.debug(`Added humidity characteristic for device ${this.deviceSerial}`);
+      } else if (!hasHumidity && this.hasHumiditySensor) {
+        // Device no longer has humidity sensor - remove the characteristic
+        this.hasHumiditySensor = false;
+        if (this.service.testCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)) {
+          this.service.removeCharacteristic(
+            this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity),
+          );
+          this.platform.log.debug(`Removed humidity characteristic for device ${this.deviceSerial}`);
+        }
       }
 
       // Convert adapter data to DeviceStatus format
@@ -143,7 +159,8 @@ export class KumoThermostatAccessory {
         );
       }
 
-      if (status.humidity !== null) {
+      // Only update humidity if the device has a humidity sensor
+      if (this.hasHumiditySensor && status.humidity !== null) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.CurrentRelativeHumidity,
           status.humidity,
