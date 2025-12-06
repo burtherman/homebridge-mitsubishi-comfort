@@ -223,7 +223,7 @@ export class KumoAPI {
 
   async getZonesWithETag(siteId: string): Promise<{ zones: Zone[]; notModified: boolean }> {
     const etag = this.siteEtags.get(siteId);
-    
+
     // Ensure we have a valid token
     const authenticated = await this.ensureAuthenticated();
     if (!authenticated) {
@@ -251,7 +251,8 @@ export class KumoAPI {
       }
 
       if (!response.ok) {
-        this.log.error(`Failed to fetch zones for site ${siteId}: ${response.status}`);
+        const errorBody = await response.text();
+        this.log.error(`Failed to fetch zones for site ${siteId}: ${response.status} - ${errorBody}`);
         return { zones: [], notModified: false };
       }
 
@@ -262,6 +263,14 @@ export class KumoAPI {
       }
 
       const zones = await response.json() as Zone[];
+
+      if (this.debugMode) {
+        this.log.debug(`Fetched ${zones.length} zones for site ${siteId}`);
+        zones.forEach(zone => {
+          this.log.debug(`Zone ${zone.name} (${zone.adapter.deviceSerial}): roomTemp=${zone.adapter.roomTemp}`);
+        });
+      }
+
       return { zones, notModified: false };
     } catch (error) {
       this.log.error('Error fetching zones with ETag:', error);
