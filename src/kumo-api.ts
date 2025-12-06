@@ -275,7 +275,7 @@ export class KumoAPI {
   }
 
   async sendCommand(deviceSerial: string, commands: Commands): Promise<boolean> {
-    this.log.debug(`Sending command to device ${deviceSerial}:`, commands);
+    this.log.debug(`Sending command to device ${deviceSerial}:`, JSON.stringify(commands));
 
     const request: SendCommandRequest = {
       deviceSerial,
@@ -288,7 +288,18 @@ export class KumoAPI {
       request,
     );
 
-    return response?.success || false;
+    if (!response) {
+      this.log.error(`Send command failed: no response from API for device ${deviceSerial}`);
+      return false;
+    }
+
+    if (!response.success) {
+      this.log.error(`Send command failed: API returned success=false for device ${deviceSerial}`);
+      return false;
+    }
+
+    this.log.debug(`Command sent successfully to device ${deviceSerial}`);
+    return true;
   }
 
   destroy(): void {

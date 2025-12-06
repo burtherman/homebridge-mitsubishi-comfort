@@ -261,7 +261,7 @@ export class KumoThermostatAccessory {
       // Update status immediately after successful command
       setTimeout(() => this.updateStatus(), 1000);
     } else {
-      this.platform.log.error('Failed to set target heating cooling state');
+      this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
     }
   }
 
@@ -325,7 +325,7 @@ export class KumoThermostatAccessory {
       // Update status immediately after successful command
       setTimeout(() => this.updateStatus(), 1000);
     } else {
-      this.platform.log.error('Failed to set target temperature');
+      this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
     }
   }
 
