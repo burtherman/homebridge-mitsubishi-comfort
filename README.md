@@ -22,14 +22,14 @@ A Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API.
 ### Install from NPM (once published)
 
 ```bash
-npm install -g homebridge-kumo-v3
+npm install -g homebridge-mitsubishi-comfort
 ```
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/yourusername/homebridge-kumo-v3.git
-cd homebridge-kumo-v3
+git clone https://github.com/burtherman/homebridge-mitsubishi-comfort.git
+cd homebridge-mitsubishi-comfort
 npm install
 npm run build
 npm link
@@ -60,6 +60,9 @@ Add the following to your Homebridge `config.json`:
 | `name` | string | No | Platform name (default: "Kumo") |
 | `username` | string | Yes | Your Kumo Cloud email address |
 | `password` | string | Yes | Your Kumo Cloud password |
+| `pollInterval` | number | No | Status polling interval in seconds (default: 30) |
+| `excludeDevices` | string[] | No | Array of device serial numbers to exclude |
+| `debug` | boolean | No | Enable debug logging (default: false) |
 
 ## Development
 
@@ -101,6 +104,22 @@ This will compile TypeScript, link the plugin, and restart on changes.
 - `GET /v3/sites/{siteId}/zones` - Get zones for a site
 - `GET /v3/devices/{deviceSerial}/status` - Get device status
 - `POST /v3/devices/send-command` - Send commands to device
+
+## Security
+
+### Best Practices
+
+- **Credentials**: Your Kumo Cloud credentials are stored in the Homebridge config file. Ensure this file has appropriate permissions (readable only by the Homebridge user).
+- **Debug Mode**: Only enable debug mode when troubleshooting. Debug logs may contain sensitive information like API endpoints and error details.
+- **Network**: This plugin communicates with Kumo Cloud servers over HTTPS. Ensure your Homebridge instance runs in a secure network environment.
+- **Updates**: Keep the plugin updated to receive security patches.
+
+### What Data is Transmitted
+
+- Authentication credentials (username/password) are sent to Kumo Cloud API during login
+- Device commands and status updates are exchanged with Kumo Cloud servers
+- No data is transmitted to third parties
+- All communication uses HTTPS encryption
 
 ## Troubleshooting
 

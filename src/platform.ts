@@ -17,6 +17,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
 
   public readonly accessories: PlatformAccessory[] = [];
+  private readonly accessoryHandlers: KumoThermostatAccessory[] = [];
   private readonly kumoAPI: KumoAPI;
   private readonly kumoConfig: KumoConfig;
 
@@ -30,9 +31,30 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     const kumoConfig = this.kumoConfig;
 
+    // Validate required configuration
     if (!kumoConfig.username || !kumoConfig.password) {
       this.log.error('Username and password are required in config');
       throw new Error('Missing required configuration');
+    }
+
+    // Validate username format (should be an email)
+    if (typeof kumoConfig.username !== 'string' || !kumoConfig.username.includes('@')) {
+      this.log.error('Username must be a valid email address');
+      throw new Error('Invalid username format');
+    }
+
+    // Validate password is a non-empty string
+    if (typeof kumoConfig.password !== 'string' || kumoConfig.password.trim().length === 0) {
+      this.log.error('Password must be a non-empty string');
+      throw new Error('Invalid password format');
+    }
+
+    // Validate pollInterval if provided
+    if (kumoConfig.pollInterval !== undefined) {
+      if (typeof kumoConfig.pollInterval !== 'number' || kumoConfig.pollInterval < 5) {
+        this.log.error('Poll interval must be a number >= 5 seconds');
+        throw new Error('Invalid poll interval');
+      }
     }
 
     this.kumoAPI = new KumoAPI(
@@ -46,6 +68,22 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       log.debug('Executed didFinishLaunching callback');
       this.discoverDevices();
     });
+
+    this.api.on('shutdown', () => {
+      log.debug('Shutting down platform');
+      this.cleanup();
+    });
+  }
+
+  private cleanup() {
+    // Clean up all accessory handlers
+    for (const handler of this.accessoryHandlers) {
+      handler.destroy();
+    }
+    this.accessoryHandlers.length = 0;
+
+    // Clean up API
+    this.kumoAPI.destroy();
   }
 
   configureAccessory(accessory: PlatformAccessory) {
@@ -121,7 +159,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             };
 
             // Create accessory handler
-            new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI, this.kumoConfig.pollInterval);
+            const handler = new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI, this.kumoConfig.pollInterval);
+            this.accessoryHandlers.push(handler);
 
             // Update accessory if needed
             this.api.updatePlatformAccessories([existingAccessory]);
@@ -139,7 +178,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             };
 
             // Create accessory handler
-            new KumoThermostatAccessory(this, accessory, this.kumoAPI, this.kumoConfig.pollInterval);
+            const handler = new KumoThermostatAccessory(this, accessory, this.kumoAPI, this.kumoConfig.pollInterval);
+            this.accessoryHandlers.push(handler);
 
             // Register accessory
             this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);

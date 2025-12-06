@@ -30,7 +30,18 @@ export class KumoAPI {
     this.debugMode = debug;
     if (this.debugMode) {
       this.log.info('Debug mode enabled');
+      this.log.warn('Debug mode may log sensitive information - use only for troubleshooting');
     }
+  }
+
+  private maskToken(token: string | null): string {
+    if (!token) {
+      return 'null';
+    }
+    if (token.length <= 8) {
+      return '***';
+    }
+    return `${token.substring(0, 4)}...${token.substring(token.length - 4)}`;
   }
 
   async login(): Promise<boolean> {
@@ -52,7 +63,12 @@ export class KumoAPI {
       });
 
       if (!response.ok) {
+        const errorText = await response.text();
         this.log.error(`Login failed with status: ${response.status}`);
+        // Only log response body in debug mode, as it may contain sensitive info
+        if (this.debugMode && errorText) {
+          this.log.debug(`Login error response: ${errorText}`);
+        }
         return false;
       }
 
@@ -71,7 +87,14 @@ export class KumoAPI {
 
       return true;
     } catch (error) {
-      this.log.error('Login error:', error);
+      if (error instanceof Error) {
+        this.log.error('Login error:', error.message);
+        if (this.debugMode) {
+          this.log.debug('Login error stack:', error.stack);
+        }
+      } else {
+        this.log.error('Login error: Unknown error occurred');
+      }
       return false;
     }
   }
@@ -127,7 +150,11 @@ export class KumoAPI {
 
       return true;
     } catch (error) {
-      this.log.error('Token refresh error:', error);
+      if (error instanceof Error) {
+        this.log.error('Token refresh error:', error.message);
+      } else {
+        this.log.error('Token refresh error: Unknown error occurred');
+      }
       return await this.login();
     }
   }
@@ -141,6 +168,15 @@ export class KumoAPI {
       return await this.refreshAccessToken();
     }
     return true;
+  }
+
+  private getAuthHeaders(): Record<string, string> {
+    return {
+      'Authorization': `Bearer ${this.accessToken}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'X-App-Version': APP_VERSION,
+    };
   }
 
   private async makeAuthenticatedRequest<T>(
@@ -158,12 +194,7 @@ export class KumoAPI {
     try {
       const options: RequestInit = {
         method,
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'X-App-Version': APP_VERSION,
-        },
+        headers: this.getAuthHeaders(),
       };
 
       if (body) {
@@ -181,13 +212,7 @@ export class KumoAPI {
         }
 
         // Retry request with new token
-        options.headers = {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'X-App-Version': APP_VERSION,
-        };
-
+        options.headers = this.getAuthHeaders();
         const retryResponse = await fetch(`${API_BASE_URL}${endpoint}`, options);
         if (!retryResponse.ok) {
           this.log.error(`Request failed after retry: ${retryResponse.status}`);
@@ -204,7 +229,15 @@ export class KumoAPI {
 
       return await response.json() as T;
     } catch (error) {
-      this.log.error('Request error:', error);
+      // Log errors without exposing sensitive details
+      if (error instanceof Error) {
+        this.log.error('Request error:', error.message);
+        if (this.debugMode) {
+          this.log.debug('Full error stack:', error.stack);
+        }
+      } else {
+        this.log.error('Request error: Unknown error occurred');
+      }
       return null;
     }
   }
@@ -232,11 +265,7 @@ export class KumoAPI {
     }
 
     try {
-      const headers: Record<string, string> = {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Accept': 'application/json',
-        'X-App-Version': APP_VERSION,
-      };
+      const headers = this.getAuthHeaders();
 
       if (etag) {
         headers['If-None-Match'] = etag;
@@ -273,7 +302,11 @@ export class KumoAPI {
 
       return { zones, notModified: false };
     } catch (error) {
-      this.log.error('Error fetching zones with ETag:', error);
+      if (error instanceof Error) {
+        this.log.error('Error fetching zones with ETag:', error.message);
+      } else {
+        this.log.error('Error fetching zones: Unknown error occurred');
+      }
       return { zones: [], notModified: false };
     }
   }
