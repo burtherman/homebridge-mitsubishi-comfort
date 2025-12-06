@@ -88,5 +88,5 @@ export interface SendCommandRequest {
 }
 
 export interface SendCommandResponse {
-  success: boolean;
+  devices: string[]; // Array of device serial numbers that received the command
 }

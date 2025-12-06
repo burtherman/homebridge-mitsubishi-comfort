@@ -335,8 +335,18 @@ export class KumoAPI {
       return false;
     }
 
-    if (!response.success) {
-      this.log.error(`Send command failed: API returned success=false for device ${deviceSerial}`);
+    // The API returns { devices: ["serialNumber"] } on success
+    if (!response.devices || !Array.isArray(response.devices)) {
+      this.log.error(`Send command failed: unexpected response format for device ${deviceSerial}`);
+      if (this.debugMode) {
+        this.log.debug(`Response:`, JSON.stringify(response));
+      }
+      return false;
+    }
+
+    // Check if our device is in the response
+    if (!response.devices.includes(deviceSerial)) {
+      this.log.error(`Send command failed: device ${deviceSerial} not in response devices list`);
       return false;
     }
 
