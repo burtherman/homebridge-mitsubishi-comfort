@@ -127,15 +127,21 @@ export class KumoThermostatAccessory {
         this.mapToTargetHeatingCoolingState(status),
       );
 
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentTemperature,
-        status.roomTemp,
-      );
+      // Only update temperature if valid
+      if (status.roomTemp !== undefined && status.roomTemp !== null && !isNaN(status.roomTemp)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.CurrentTemperature,
+          status.roomTemp,
+        );
+      }
 
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetTemperature,
-        this.getTargetTempFromStatus(status),
-      );
+      const targetTemp = this.getTargetTempFromStatus(status);
+      if (targetTemp !== undefined && targetTemp !== null && !isNaN(targetTemp)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.TargetTemperature,
+          targetTemp,
+        );
+      }
 
       if (status.humidity !== null) {
         this.service.updateCharacteristic(
