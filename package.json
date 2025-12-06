@@ -1,0 +1,31 @@
+{
+  "name": "homebridge-mitsubishi-comfort",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Mitsubishi heat pumps using Kumo Cloud v3 API",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "rimraf ./dist && tsc",
+    "watch": "npm run build && npm link && nodemon",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "mitsubishi",
+    "kumo",
+    "heat-pump"
+  ],
+  "engines": {
+    "node": ">=14.18.1",
+    "homebridge": ">=1.3.5"
+  },
+  "dependencies": {
+    "node-fetch": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^15.12.3",
+    "homebridge": "^1.3.1",
+    "nodemon": "^2.0.7",
+    "rimraf": "^3.0.2",
+    "typescript": "^4.2.2"
+  }
+}

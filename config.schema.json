@@ -1,0 +1,51 @@
+{
+  "pluginAlias": "KumoV3",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Kumo",
+        "required": true
+      },
+      "username": {
+        "title": "Username",
+        "type": "string",
+        "required": true,
+        "description": "Your Kumo Cloud email address"
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "required": true,
+        "description": "Your Kumo Cloud password"
+      },
+      "pollInterval": {
+        "title": "Poll Interval",
+        "type": "integer",
+        "default": 30,
+        "minimum": 10,
+        "maximum": 300,
+        "description": "How often to check for status updates (in seconds). Default: 30"
+      },
+      "debug": {
+        "title": "Debug Mode",
+        "type": "boolean",
+        "default": false,
+        "description": "Enable verbose logging for troubleshooting"
+      },
+      "excludeDevices": {
+        "title": "Exclude Devices",
+        "type": "array",
+        "items": {
+          "type": "string",
+          "title": "Device Serial"
+        },
+        "description": "Array of device serial numbers to ignore (optional)"
+      }
+    }
+  }
+}
