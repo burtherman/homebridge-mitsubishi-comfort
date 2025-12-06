@@ -203,15 +203,19 @@ export class KumoThermostatAccessory {
 
   private getTargetTempFromStatus(status: DeviceStatus): number {
     // Return the appropriate setpoint based on current mode
-    if (status.operationMode === 'heat') {
+    if (status.operationMode === 'heat' && status.spHeat !== undefined && status.spHeat !== null) {
       return status.spHeat;
-    } else if (status.operationMode === 'cool') {
+    } else if (status.operationMode === 'cool' && status.spCool !== undefined && status.spCool !== null) {
       return status.spCool;
-    } else if (status.operationMode === 'auto' && status.spAuto !== null) {
+    } else if (status.operationMode === 'auto' && status.spAuto !== null && status.spAuto !== undefined) {
       return status.spAuto;
     }
-    // Default to heat setpoint
-    return status.spHeat;
+    // Default to heat setpoint if available, otherwise return a default value
+    if (status.spHeat !== undefined && status.spHeat !== null) {
+      return status.spHeat;
+    }
+    // Final fallback
+    return 20;
   }
 
   async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
