@@ -303,20 +303,24 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    // Round to nearest 0.5°C as Kumo API uses 0.5 degree increments
+    const roundedTemp = Math.round(temp * 2) / 2;
+    this.platform.log.debug(`Rounded temperature from ${temp} to ${roundedTemp}`);
+
     // Set the appropriate setpoint based on current mode
     const commands: { spHeat?: number; spCool?: number } = {};
 
     if (this.currentStatus.operationMode === 'heat') {
-      commands.spHeat = temp;
+      commands.spHeat = roundedTemp;
     } else if (this.currentStatus.operationMode === 'cool') {
-      commands.spCool = temp;
+      commands.spCool = roundedTemp;
     } else if (this.currentStatus.operationMode === 'auto') {
       // For auto mode, set both setpoints
-      commands.spHeat = temp;
-      commands.spCool = temp;
+      commands.spHeat = roundedTemp;
+      commands.spCool = roundedTemp;
     } else {
       // If off, set heat setpoint by default
-      commands.spHeat = temp;
+      commands.spHeat = roundedTemp;
     }
 
     const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
