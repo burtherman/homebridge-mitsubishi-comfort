@@ -1,5 +1,5 @@
 export const PLATFORM_NAME = 'KumoV3';
-export const PLUGIN_NAME = 'homebridge-kumo-v3';
+export const PLUGIN_NAME = 'homebridge-mitsubishi-comfort';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';
 export const TOKEN_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 minutes
 export const POLL_INTERVAL = 30 * 1000; // 30 seconds
