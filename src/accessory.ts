@@ -76,16 +76,24 @@ export class KumoThermostatAccessory {
     try {
       // Fetch zones for this device's site with ETag support
       const result = await this.kumoAPI.getZonesWithETag(this.siteId);
-      
+
       // If not modified (304), keep existing status
       if (result.notModified) {
+        this.platform.log.debug(`Status not modified for device ${this.deviceSerial}`);
         return;
       }
 
       // Find this device's zone in the results
       const zone = result.zones.find(z => z.adapter.deviceSerial === this.deviceSerial);
       if (!zone) {
-        this.platform.log.warn(`Device ${this.deviceSerial} not found in zones`);
+        this.platform.log.error(`Device ${this.deviceSerial} not found in zones response`);
+        return;
+      }
+
+      // Validate required fields
+      if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
+        this.platform.log.error(`Device ${this.deviceSerial} has invalid roomTemp: ${zone.adapter.roomTemp}`);
+        this.platform.log.debug('Zone adapter data:', JSON.stringify(zone.adapter));
         return;
       }
 
@@ -106,6 +114,7 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
+      this.platform.log.debug(`Updated status for ${this.deviceSerial}: roomTemp=${status.roomTemp}, mode=${status.operationMode}`);
 
       // Update all characteristics
       this.service.updateCharacteristic(
@@ -271,12 +280,19 @@ export class KumoThermostatAccessory {
       if (status) {
         this.currentStatus = status;
       } else {
-        return 0;
+        this.platform.log.warn('No status available for getCurrentTemperature');
+        return 20; // Default fallback temperature
       }
     }
 
-    this.platform.log.debug('Get CurrentTemperature:', this.currentStatus.roomTemp);
-    return this.currentStatus.roomTemp;
+    const temp = this.currentStatus.roomTemp;
+    if (temp === undefined || temp === null || isNaN(temp)) {
+      this.platform.log.warn('Invalid roomTemp value:', temp);
+      return 20; // Default fallback temperature
+    }
+
+    this.platform.log.debug('Get CurrentTemperature:', temp);
+    return temp;
   }
 
   async getTargetTemperature(): Promise<CharacteristicValue> {
@@ -285,11 +301,17 @@ export class KumoThermostatAccessory {
       if (status) {
         this.currentStatus = status;
       } else {
-        return 20;
+        this.platform.log.warn('No status available for getTargetTemperature');
+        return 20; // Default fallback temperature
       }
     }
 
     const temp = this.getTargetTempFromStatus(this.currentStatus);
+    if (temp === undefined || temp === null || isNaN(temp)) {
+      this.platform.log.warn('Invalid target temperature value:', temp);
+      return 20; // Default fallback temperature
+    }
+
     this.platform.log.debug('Get TargetTemperature:', temp);
     return temp;
   }
