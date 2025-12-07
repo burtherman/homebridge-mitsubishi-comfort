@@ -4,6 +4,10 @@
   "description": "Homebridge plugin for Mitsubishi heat pumps using Kumo Cloud v3 API",
   "author": "burtherman",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "config.schema.json"
+  ],
   "scripts": {
     "build": "rimraf ./dist && tsc",
     "watch": "npm run build && npm link && nodemon",

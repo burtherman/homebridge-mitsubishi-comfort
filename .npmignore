@@ -1,0 +1,29 @@
+# Source files (only ship compiled dist/)
+src/
+*.ts
+!*.d.ts
+tsconfig.json
+
+# Development files
+node_modules/
+.git/
+.gitignore
+.DS_Store
+*.log
+
+# Test files
+test-api.js
+test-send-command.js
+
+# Documentation for development
+kumo-v3-spec.md
+WARP.md
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CI/CD
+.github/

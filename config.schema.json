@@ -2,6 +2,8 @@
   "pluginAlias": "KumoV3",
   "pluginType": "platform",
   "singular": true,
+  "headerDisplay": "Homebridge plugin for Mitsubishi heat pumps using Kumo Cloud v3 API.",
+  "footerDisplay": "For help and support, visit the [GitHub repository](https://github.com/burtherman/homebridge-mitsubishi-comfort).",
   "schema": {
     "type": "object",
     "properties": {
@@ -15,6 +17,7 @@
         "title": "Username",
         "type": "string",
         "required": true,
+        "format": "email",
         "description": "Your Kumo Cloud email address"
       },
       "password": {
@@ -24,28 +27,42 @@
         "description": "Your Kumo Cloud password"
       },
       "pollInterval": {
-        "title": "Poll Interval",
+        "title": "Poll Interval (seconds)",
         "type": "integer",
         "default": 30,
-        "minimum": 10,
-        "maximum": 300,
-        "description": "How often to check for status updates (in seconds). Default: 30"
+        "minimum": 5,
+        "description": "How often to poll device status (minimum 5 seconds)"
       },
       "debug": {
         "title": "Debug Mode",
         "type": "boolean",
         "default": false,
-        "description": "Enable verbose logging for troubleshooting"
+        "description": "Enable verbose debug logging (requires running Homebridge with -D flag)"
       },
       "excludeDevices": {
-        "title": "Exclude Devices",
+        "title": "Excluded Devices",
         "type": "array",
         "items": {
           "type": "string",
-          "title": "Device Serial"
+          "title": "Device Serial Number"
         },
-        "description": "Array of device serial numbers to ignore (optional)"
+        "description": "List of device serial numbers to exclude from HomeKit"
       }
     }
-  }
+  },
+  "layout": [
+    {
+      "type": "fieldset",
+      "title": "Kumo Cloud Credentials",
+      "expandable": false,
+      "items": ["username", "password"]
+    },
+    {
+      "type": "fieldset",
+      "title": "Advanced Settings",
+      "expandable": true,
+      "expanded": false,
+      "items": ["pollInterval", "excludeDevices", "debug"]
+    }
+  ]
 }
