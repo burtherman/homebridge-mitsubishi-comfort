@@ -254,7 +254,7 @@ export class KumoAPI {
     return zones || [];
   }
 
-  async getZonesWithETag(siteId: string): Promise<{ zones: Zone[]; notModified: boolean }> {
+  async getZonesWithETag(siteId: string, forceRefresh: boolean = false): Promise<{ zones: Zone[]; notModified: boolean }> {
     const etag = this.siteEtags.get(siteId);
 
     // Ensure we have a valid token
@@ -267,7 +267,8 @@ export class KumoAPI {
     try {
       const headers = this.getAuthHeaders();
 
-      if (etag) {
+      // Only send ETag if we're not forcing a refresh
+      if (etag && !forceRefresh) {
         headers['If-None-Match'] = etag;
       }
 

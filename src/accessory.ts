@@ -69,10 +69,11 @@ export class KumoThermostatAccessory {
     }, this.pollIntervalMs);
   }
 
-  private async updateStatus() {
+  private async updateStatus(forceRefresh: boolean = false) {
     try {
       // Fetch zones for this device's site with ETag support
-      const result = await this.kumoAPI.getZonesWithETag(this.siteId);
+      // Skip ETag if forceRefresh is true (e.g., after sending a command)
+      const result = await this.kumoAPI.getZonesWithETag(this.siteId, forceRefresh);
 
       // If not modified (304), keep existing status
       if (result.notModified) {
@@ -295,7 +296,8 @@ export class KumoThermostatAccessory {
 
     if (success) {
       // Update status immediately after successful command
-      setTimeout(() => this.updateStatus(), 1000);
+      // Force refresh to bypass ETag caching and get fresh data
+      setTimeout(() => this.updateStatus(true), 1000);
     } else {
       this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
     }
@@ -376,7 +378,8 @@ export class KumoThermostatAccessory {
 
     if (success) {
       // Update status immediately after successful command
-      setTimeout(() => this.updateStatus(), 1000);
+      // Force refresh to bypass ETag caching and get fresh data
+      setTimeout(() => this.updateStatus(true), 1000);
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
     }
