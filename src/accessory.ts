@@ -295,9 +295,15 @@ export class KumoThermostatAccessory {
     });
 
     if (success) {
-      // Update status immediately after successful command
-      // Force refresh to bypass ETag caching and get fresh data
-      setTimeout(() => this.updateStatus(true), 1000);
+      // Optimistic update - immediately update local state
+      if (this.currentStatus) {
+        this.currentStatus.operationMode = operationMode;
+        this.currentStatus.power = operationMode === 'off' ? 0 : 1;
+      }
+
+      // Verify with server after delay to confirm the change
+      // 3 seconds gives device time to process the command
+      setTimeout(() => this.updateStatus(true), 3000);
     } else {
       this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
     }
@@ -377,9 +383,19 @@ export class KumoThermostatAccessory {
     const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
 
     if (success) {
-      // Update status immediately after successful command
-      // Force refresh to bypass ETag caching and get fresh data
-      setTimeout(() => this.updateStatus(true), 1000);
+      // Optimistic update - immediately update local state
+      if (this.currentStatus) {
+        if (commands.spHeat !== undefined) {
+          this.currentStatus.spHeat = commands.spHeat;
+        }
+        if (commands.spCool !== undefined) {
+          this.currentStatus.spCool = commands.spCool;
+        }
+      }
+
+      // Verify with server after delay to confirm the change
+      // 3 seconds gives device time to process the command
+      setTimeout(() => this.updateStatus(true), 3000);
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
     }
