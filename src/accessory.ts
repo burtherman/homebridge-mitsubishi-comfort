@@ -69,6 +69,7 @@ export class KumoThermostatAccessory {
     }, this.pollIntervalMs);
   }
 
+
   private resetPollingTimer() {
     // Clear existing timer and restart
     if (this.pollTimer) {
@@ -78,7 +79,6 @@ export class KumoThermostatAccessory {
       this.updateStatus();
     }, this.pollIntervalMs);
   }
-
   private async updateStatus(forceRefresh: boolean = false) {
     try {
       // Fetch zones for this device's site with ETag support
@@ -311,8 +311,8 @@ export class KumoThermostatAccessory {
         this.currentStatus.power = operationMode === 'off' ? 0 : 1;
       }
 
-      // Verify with server after delay to confirm the change
-      // 3 seconds gives device time to process the command
+      // Reset polling timer to avoid stale data
+      // This delays next poll by full interval, giving device time to update
       this.resetPollingTimer();
     } else {
       this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
@@ -362,7 +362,6 @@ export class KumoThermostatAccessory {
   }
 
   async setTargetTemperature(value: CharacteristicValue) {
-    this.platform.log.error(`[DEBUG-TEMP] setTargetTemperature called with: ${value}`);
     const temp = value as number;
     this.platform.log.debug('Set TargetTemperature:', temp);
 
@@ -409,9 +408,8 @@ export class KumoThermostatAccessory {
         this.platform.Characteristic.TargetTemperature,
         roundedTemp,
       );
-
-      // Verify with server after delay to confirm the change
-      // 3 seconds gives device time to process the command
+      // Reset polling timer to avoid stale data
+      // This delays next poll by full interval, giving device time to update
       this.resetPollingTimer();
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
