@@ -61,7 +61,8 @@ export class KumoThermostatAccessory {
 
   private startPolling() {
     // Do an immediate update
-    this.updateStatus();
+    // Do an immediate update with force refresh to bypass ETag cache on startup
+    this.updateStatus(true);
 
     // Then poll at regular intervals
     this.pollTimer = setInterval(() => {
@@ -81,6 +82,7 @@ export class KumoThermostatAccessory {
   }
   private async updateStatus(forceRefresh: boolean = false) {
     try {
+      this.platform.log.info(`[TEMP-DEBUG] updateStatus called for ${this.deviceSerial}, forceRefresh=${forceRefresh}`);
       // Fetch zones for this device's site with ETag support
       // Skip ETag if forceRefresh is true (e.g., after sending a command)
       const result = await this.kumoAPI.getZonesWithETag(this.siteId, forceRefresh);
@@ -141,6 +143,7 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
+      this.platform.log.warn(`[TEMP-DEBUG] ${this.accessory.displayName} - roomTemp: ${status.roomTemp}°C, spHeat: ${status.spHeat}°C, spCool: ${status.spCool}°C, spAuto: ${status.spAuto}°C, mode: ${status.operationMode}`);
       this.platform.log.debug(`Updated status for ${this.deviceSerial}: roomTemp=${status.roomTemp}, mode=${status.operationMode}`);
 
       // Update all characteristics
@@ -336,7 +339,8 @@ export class KumoThermostatAccessory {
       return 20; // Default fallback temperature
     }
 
-    this.platform.log.debug('Get CurrentTemperature:', temp);
+    this.platform.log.info(`[TEMP-DEBUG] HomeKit requesting current temp for ${this.accessory.displayName}: ${temp}°C`);
+    return temp;
     return temp;
   }
 
@@ -358,6 +362,7 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.debug('Get TargetTemperature:', temp);
+    this.platform.log.info(`[TEMP-DEBUG] HomeKit requesting target temp for ${this.accessory.displayName}: ${temp}°C`);
     return temp;
   }
 
@@ -365,14 +370,15 @@ export class KumoThermostatAccessory {
     const temp = value as number;
     this.platform.log.debug('Set TargetTemperature:', temp);
 
+    this.platform.log.info(`[TEMP-DEBUG] HomeKit setting target temp for ${this.accessory.displayName}: received ${temp}°C, rounded to ${Math.round(temp * 2) / 2}°C`);
     if (!this.currentStatus) {
       this.platform.log.error('Cannot set temperature - no current status');
       return;
     }
 
-    // Round to nearest 0.5°C as Kumo API uses 0.5 degree increments
-    const roundedTemp = Math.round(temp * 2) / 2;
-    this.platform.log.debug(`Rounded temperature from ${temp} to ${roundedTemp}`);
+    // Send exact temperature value - API accepts fine granularity
+    const roundedTemp = temp;
+    this.platform.log.warn(`[TEMP-DEBUG] Sending to API: ${roundedTemp}°C`);
 
     // Set the appropriate setpoint based on current mode
     const commands: { spHeat?: number; spCool?: number } = {};
