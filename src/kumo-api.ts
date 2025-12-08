@@ -127,20 +127,25 @@ export class KumoAPI {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Bearer ${this.refreshToken}`,
           'X-App-Version': APP_VERSION,
         },
+        body: JSON.stringify({
+          refresh: this.refreshToken,
+        }),
       });
 
       if (!response.ok) {
-        this.log.warn('Token refresh failed, attempting full login');
+        const errorText = await response.text();
+        this.log.warn(`Token refresh failed (${response.status}): ${errorText}`);
+        this.log.warn('Attempting full login');
         return await this.login();
       }
 
-      const data = await response.json() as LoginResponse;
+      const data = await response.json() as any;
 
-      this.accessToken = data.token.access;
-      this.refreshToken = data.token.refresh;
+      // The refresh endpoint returns tokens directly, not nested under 'token'
+      this.accessToken = data.access;
+      this.refreshToken = data.refresh;
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
 
       this.log.debug('Access token refreshed successfully');
