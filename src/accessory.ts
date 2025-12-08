@@ -1,7 +1,7 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
-import { POLL_INTERVAL, DeviceStatus } from './settings';
+import { POLL_INTERVAL, DeviceStatus, Zone } from './settings';
 
 export class KumoThermostatAccessory {
   private service: Service;
@@ -55,53 +55,26 @@ export class KumoThermostatAccessory {
       .onGet(this.getTemperatureDisplayUnits.bind(this))
       .onSet(this.setTemperatureDisplayUnits.bind(this));
 
-    // Start polling for status updates
-    this.startPolling();
+    // Note: Polling is now handled at the platform level (centralized site polling)
+    // This accessory will receive updates via updateFromZone()
   }
 
-  private startPolling() {
-    // Do an immediate update
-    // Do an immediate update with force refresh to bypass ETag cache on startup
-    this.updateStatus(true);
-
-    // Then poll at regular intervals
-    this.pollTimer = setInterval(() => {
-      this.updateStatus();
-    }, this.pollIntervalMs);
+  // Getter methods for platform to access private properties
+  public getSiteId(): string {
+    return this.siteId;
   }
 
-
-  private resetPollingTimer() {
-    // Clear existing timer and restart
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-    }
-    this.pollTimer = setInterval(() => {
-      this.updateStatus();
-    }, this.pollIntervalMs);
+  public getDeviceSerial(): string {
+    return this.deviceSerial;
   }
-  private async updateStatus(forceRefresh: boolean = false) {
+
+  // Called by platform when new zone data is available
+  public updateFromZone(zone: Zone) {
+    this.processZoneUpdate(zone);
+  }
+  private processZoneUpdate(zone: Zone) {
     try {
-      this.platform.log.debug(`Updating status for ${this.deviceSerial}`);
-      // Fetch zones for this device's site
-      // Always bypass ETag cache to ensure temperature updates are received
-      // The API's ETag only changes on control state changes (power, mode, setpoints),
-      // not on sensor readings (roomTemp, humidity), causing stale temperature data
-      const result = await this.kumoAPI.getZonesWithETag(this.siteId, true);
-
-      // If not modified (304), keep existing status
-      // NOTE: This should never happen now since we always force refresh
-      if (result.notModified) {
-        this.platform.log.debug(`Status not modified for device ${this.deviceSerial}`);
-        return;
-      }
-
-      // Find this device's zone in the results
-      const zone = result.zones.find(z => z.adapter.deviceSerial === this.deviceSerial);
-      if (!zone) {
-        this.platform.log.error(`Device ${this.deviceSerial} not found in zones response`);
-        return;
-      }
+      this.platform.log.debug(`Processing zone update for ${this.deviceSerial}`);
 
       // Validate required fields
       if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
@@ -316,9 +289,7 @@ export class KumoThermostatAccessory {
         this.currentStatus.power = operationMode === 'off' ? 0 : 1;
       }
 
-      // Reset polling timer to avoid stale data
-      // This delays next poll by full interval, giving device time to update
-      this.resetPollingTimer();
+      // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
       this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
     }
@@ -409,9 +380,8 @@ export class KumoThermostatAccessory {
         this.platform.Characteristic.TargetTemperature,
         temp,
       );
-      // Reset polling timer to avoid stale data
-      // This delays next poll by full interval, giving device time to update
-      this.resetPollingTimer();
+
+      // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
     }
@@ -441,9 +411,7 @@ export class KumoThermostatAccessory {
   }
 
   destroy() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    // Note: No per-device polling timer to clean up
+    // Polling is handled at the platform level
   }
 }

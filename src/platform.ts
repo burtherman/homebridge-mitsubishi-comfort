@@ -20,6 +20,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private readonly accessoryHandlers: KumoThermostatAccessory[] = [];
   private readonly kumoAPI: KumoAPI;
   private readonly kumoConfig: KumoConfig;
+  private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
+  private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
 
   constructor(
     public readonly log: Logger,
@@ -76,6 +78,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   }
 
   private cleanup() {
+    // Clean up all site pollers
+    for (const [siteId, timer] of this.sitePollers) {
+      clearInterval(timer);
+      this.log.debug(`Stopped site poller for ${siteId}`);
+    }
+    this.sitePollers.clear();
+
     // Clean up all accessory handlers
     for (const handler of this.accessoryHandlers) {
       handler.destroy();
@@ -203,8 +212,70 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
 
       this.log.info('Device discovery completed');
+
+      // Start site-level polling for all unique sites
+      const uniqueSites = new Set(discoveredDevices.map(d =>
+        this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
+      ).filter(Boolean));
+
+      for (const siteId of uniqueSites) {
+        this.startSitePoller(siteId as string);
+      }
     } catch (error) {
       this.log.error('Error during device discovery:', error);
+    }
+  }
+
+  private startSitePoller(siteId: string) {
+    // Don't start if already polling
+    if (this.sitePollers.has(siteId)) {
+      return;
+    }
+
+    this.log.info(`Starting centralized poller for site: ${siteId}`);
+
+    // Group accessories by site for efficient distribution
+    const accessories = this.accessoryHandlers.filter(
+      handler => handler.getSiteId() === siteId
+    );
+    this.siteAccessories.set(siteId, accessories);
+
+    // Do immediate poll
+    this.pollSite(siteId);
+
+    // Then poll at regular intervals
+    const pollInterval = (this.kumoConfig.pollInterval || 30) * 1000;
+    const timer = setInterval(() => {
+      this.pollSite(siteId);
+    }, pollInterval);
+
+    this.sitePollers.set(siteId, timer);
+  }
+
+  private async pollSite(siteId: string) {
+    try {
+      this.log.debug(`Polling site: ${siteId}`);
+
+      // Fetch all zones for this site (bypassing ETag for fresh data)
+      const result = await this.kumoAPI.getZonesWithETag(siteId, true);
+
+      if (result.notModified) {
+        this.log.debug(`Site ${siteId} not modified`);
+        return;
+      }
+
+      // Distribute zone data to each accessory
+      const accessories = this.siteAccessories.get(siteId) || [];
+      for (const handler of accessories) {
+        const zone = result.zones.find(z => z.adapter.deviceSerial === handler.getDeviceSerial());
+        if (zone) {
+          handler.updateFromZone(zone);
+        } else {
+          this.log.warn(`Zone not found for device: ${handler.getDeviceSerial()}`);
+        }
+      }
+    } catch (error) {
+      this.log.error(`Error polling site ${siteId}:`, error);
     }
   }
 }
