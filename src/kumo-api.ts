@@ -18,7 +18,6 @@ export class KumoAPI {
   private refreshToken: string | null = null;
   private tokenExpiresAt: number = 0;
   private refreshTimer: NodeJS.Timeout | null = null;
-  private siteEtags: Map<string, string> = new Map();
   private debugMode: boolean = false;
   private refreshInProgress: Promise<boolean> | null = null;
 
@@ -218,7 +217,19 @@ export class KumoAPI {
         options.body = JSON.stringify(body);
       }
 
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+      const url = `${API_BASE_URL}${endpoint}`;
+
+      // Debug logging: Show request details
+      if (this.debugMode) {
+        this.log.info(`→ API Request: ${method} ${endpoint}`);
+        if (body) {
+          this.log.info(`  Body: ${JSON.stringify(body)}`);
+        }
+      }
+
+      const startTime = Date.now();
+      const response = await fetch(url, options);
+      const duration = Date.now() - startTime;
 
       // Handle 401 by refreshing token and retrying once
       if (response.status === 401) {
@@ -241,10 +252,27 @@ export class KumoAPI {
 
       if (!response.ok) {
         this.log.error(`Request failed with status: ${response.status}`);
+        if (this.debugMode) {
+          const errorText = await response.text();
+          this.log.info(`  Error response: ${errorText}`);
+        }
         return null;
       }
 
-      return await response.json() as T;
+      const data = await response.json() as T;
+
+      // Debug logging: Show response summary
+      if (this.debugMode) {
+        this.log.info(`← API Response: ${response.status} (${duration}ms)`);
+        // For array responses, show count; for objects, show keys
+        if (Array.isArray(data)) {
+          this.log.info(`  Returned ${data.length} item(s)`);
+        } else if (data && typeof data === 'object') {
+          this.log.info(`  Keys: ${Object.keys(data).join(', ')}`);
+        }
+      }
+
+      return data;
     } catch (error) {
       // Log errors without exposing sensitive details
       if (error instanceof Error) {
@@ -266,66 +294,57 @@ export class KumoAPI {
   }
 
   async getZones(siteId: string): Promise<Zone[]> {
-    this.log.debug(`Fetching zones for site: ${siteId}`);
-    const zones = await this.makeAuthenticatedRequest<Zone[]>(`/sites/${siteId}/zones`);
-    return zones || [];
-  }
-
-  async getZonesWithETag(siteId: string, forceRefresh: boolean = false): Promise<{ zones: Zone[]; notModified: boolean }> {
-    const etag = this.siteEtags.get(siteId);
-
     // Ensure we have a valid token
     const authenticated = await this.ensureAuthenticated();
     if (!authenticated) {
       this.log.error('Failed to authenticate');
-      return { zones: [], notModified: false };
+      return [];
     }
 
     try {
-      const headers = this.getAuthHeaders();
+      const endpoint = `/sites/${siteId}/zones`;
 
-      // Only send ETag if we're not forcing a refresh
-      if (etag && !forceRefresh) {
-        headers['If-None-Match'] = etag;
+      // Debug logging: Show request details
+      if (this.debugMode) {
+        this.log.info(`→ API Request: GET ${endpoint}`);
       }
 
-      const response = await fetch(`${API_BASE_URL}/sites/${siteId}/zones`, { headers });
-
-      // Handle 304 Not Modified
-      if (response.status === 304) {
-        this.log.debug(`Zones for site ${siteId}: Not Modified (304)`);
-        return { zones: [], notModified: true };
-      }
+      const startTime = Date.now();
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        headers: this.getAuthHeaders(),
+      });
+      const duration = Date.now() - startTime;
 
       if (!response.ok) {
         const errorBody = await response.text();
         this.log.error(`Failed to fetch zones for site ${siteId}: ${response.status} - ${errorBody}`);
-        return { zones: [], notModified: false };
-      }
-
-      // Store new ETag
-      const newEtag = response.headers.get('etag');
-      if (newEtag) {
-        this.siteEtags.set(siteId, newEtag);
+        return [];
       }
 
       const zones = await response.json() as Zone[];
 
+      // Debug logging: Show response details
       if (this.debugMode) {
-        this.log.debug(`Fetched ${zones.length} zones for site ${siteId}`);
+        this.log.info(`← API Response: 200 (${duration}ms)`);
+        this.log.info(`  Fetched ${zones.length} zone(s) for site ${siteId}`);
         zones.forEach(zone => {
-          this.log.debug(`Zone ${zone.name} (${zone.adapter.deviceSerial}): roomTemp=${zone.adapter.roomTemp}`);
+          const a = zone.adapter;
+          this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
+          this.log.info(`      Temperature: ${a.roomTemp}°C (current) → Heat: ${a.spHeat}°C, Cool: ${a.spCool}°C, Auto: ${a.spAuto}°C`);
+          this.log.info(`      Status: ${a.operationMode} mode, power=${a.power}, connected=${a.connected}`);
+          this.log.info(`      Fan: ${a.fanSpeed}, Direction: ${a.airDirection}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
+          this.log.info(`      Signal: ${a.rssi !== undefined ? a.rssi + ' dBm' : 'N/A'}`);
         });
       }
 
-      return { zones, notModified: false };
+      return zones;
     } catch (error) {
       if (error instanceof Error) {
-        this.log.error('Error fetching zones with ETag:', error.message);
+        this.log.error('Error fetching zones:', error.message);
       } else {
         this.log.error('Error fetching zones: Unknown error occurred');
       }
-      return { zones: [], notModified: false };
+      return [];
     }
   }
 

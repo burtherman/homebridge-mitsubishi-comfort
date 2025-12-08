@@ -256,18 +256,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     try {
       this.log.debug(`Polling site: ${siteId}`);
 
-      // Fetch all zones for this site (bypassing ETag for fresh data)
-      const result = await this.kumoAPI.getZonesWithETag(siteId, true);
-
-      if (result.notModified) {
-        this.log.debug(`Site ${siteId} not modified`);
-        return;
-      }
+      // Fetch all zones for this site
+      const zones = await this.kumoAPI.getZones(siteId);
 
       // Distribute zone data to each accessory
       const accessories = this.siteAccessories.get(siteId) || [];
       for (const handler of accessories) {
-        const zone = result.zones.find(z => z.adapter.deviceSerial === handler.getDeviceSerial());
+        const zone = zones.find(z => z.adapter.deviceSerial === handler.getDeviceSerial());
         if (zone) {
           handler.updateFromZone(zone);
         } else {
