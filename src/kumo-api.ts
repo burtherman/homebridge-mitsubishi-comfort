@@ -20,6 +20,7 @@ export class KumoAPI {
   private refreshTimer: NodeJS.Timeout | null = null;
   private siteEtags: Map<string, string> = new Map();
   private debugMode: boolean = false;
+  private refreshInProgress: Promise<boolean> | null = null;
 
   constructor(
     private readonly username: string,
@@ -162,10 +163,26 @@ export class KumoAPI {
   private async ensureAuthenticated(): Promise<boolean> {
     // If no token or token is about to expire, refresh it
     if (!this.accessToken || Date.now() >= this.tokenExpiresAt - (5 * 60 * 1000)) {
-      if (!this.refreshToken) {
-        return await this.login();
+      // If a refresh is already in progress, wait for it instead of starting a new one
+      if (this.refreshInProgress) {
+        this.log.debug('Waiting for existing token refresh to complete');
+        return await this.refreshInProgress;
       }
-      return await this.refreshAccessToken();
+
+      // Start a new refresh and store the promise
+      this.refreshInProgress = (async () => {
+        try {
+          if (!this.refreshToken) {
+            return await this.login();
+          }
+          return await this.refreshAccessToken();
+        } finally {
+          // Clear the lock when done
+          this.refreshInProgress = null;
+        }
+      })();
+
+      return await this.refreshInProgress;
     }
     return true;
   }
