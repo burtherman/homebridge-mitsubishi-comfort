@@ -1,6 +1,6 @@
 {
   "name": "homebridge-mitsubishi-comfort",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Homebridge plugin for Mitsubishi heat pumps using Kumo Cloud v3 API",
   "author": "burtherman",
   "main": "dist/index.js",
