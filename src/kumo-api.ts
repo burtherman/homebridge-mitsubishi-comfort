@@ -1,9 +1,11 @@
 import fetch, { RequestInit } from 'node-fetch';
 import type { Logger } from 'homebridge';
+import { io, Socket } from 'socket.io-client';
 import {
   API_BASE_URL,
   APP_VERSION,
   TOKEN_REFRESH_INTERVAL,
+  SOCKET_BASE_URL,
   LoginResponse,
   Site,
   Zone,
@@ -13,6 +15,9 @@ import {
   SendCommandResponse,
 } from './settings';
 
+// Event callback type for device updates
+export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
+
 export class KumoAPI {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
@@ -21,16 +26,28 @@ export class KumoAPI {
   private debugMode: boolean = false;
   private refreshInProgress: Promise<boolean> | null = null;
 
+  // Streaming properties
+  private socket: Socket | null = null;
+  private streamingEnabled: boolean = true;
+  private deviceUpdateCallbacks: Map<string, DeviceUpdateCallback> = new Map();
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 5;
+
   constructor(
     private readonly username: string,
     private readonly password: string,
     private readonly log: Logger,
     debug: boolean = false,
+    enableStreaming: boolean = true,
   ) {
     this.debugMode = debug;
+    this.streamingEnabled = enableStreaming;
     if (this.debugMode) {
       this.log.info('Debug mode enabled');
       this.log.warn('Debug mode may log sensitive information - use only for troubleshooting');
+    }
+    if (this.streamingEnabled) {
+      this.log.info('Streaming mode enabled - real-time updates will be used');
     }
   }
 
@@ -396,10 +413,117 @@ export class KumoAPI {
     return true;
   }
 
+  // Streaming methods
+
+  async startStreaming(deviceSerials: string[]): Promise<boolean> {
+    if (!this.streamingEnabled) {
+      this.log.debug('Streaming is disabled, skipping connection');
+      return false;
+    }
+
+    if (this.socket?.connected) {
+      this.log.debug('Streaming already connected');
+      return true;
+    }
+
+    if (!this.accessToken) {
+      this.log.error('Cannot start streaming: not authenticated');
+      return false;
+    }
+
+    try {
+      this.log.info('Starting streaming connection...');
+
+      this.socket = io(SOCKET_BASE_URL, {
+        transports: ['polling', 'websocket'],
+        extraHeaders: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Accept': '*/*',
+          'User-Agent': 'kumocloud/1122',
+        },
+      });
+
+      this.socket.on('connect', () => {
+        this.log.info(`✓ Streaming connected (ID: ${this.socket?.id})`);
+        this.reconnectAttempts = 0;
+
+        // Subscribe to all devices
+        for (const deviceSerial of deviceSerials) {
+          this.log.debug(`Subscribing to device: ${deviceSerial}`);
+          this.socket?.emit('subscribe', deviceSerial);
+        }
+      });
+
+      this.socket.on('device_update', (data: any) => {
+        const deviceSerial = data.deviceSerial;
+        if (!deviceSerial) {
+          return;
+        }
+
+        if (this.debugMode) {
+          this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
+        }
+
+        // Trigger callbacks for this device
+        const callback = this.deviceUpdateCallbacks.get(deviceSerial);
+        if (callback) {
+          callback(deviceSerial, data);
+        }
+      });
+
+      this.socket.on('disconnect', (reason) => {
+        this.log.warn(`Streaming disconnected: ${reason}`);
+
+        // Attempt to reconnect if not a manual disconnect
+        if (reason !== 'io client disconnect' && this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          this.log.info(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          this.log.error('Max reconnect attempts reached - falling back to polling');
+        }
+      });
+
+      this.socket.on('connect_error', (error) => {
+        this.log.error(`Streaming connection error: ${error.message}`);
+      });
+
+      return true;
+    } catch (error) {
+      if (error instanceof Error) {
+        this.log.error('Failed to start streaming:', error.message);
+      }
+      return false;
+    }
+  }
+
+  subscribeToDevice(deviceSerial: string, callback: DeviceUpdateCallback): void {
+    this.deviceUpdateCallbacks.set(deviceSerial, callback);
+
+    // If already connected, subscribe immediately
+    if (this.socket?.connected) {
+      this.log.debug(`Subscribing to device: ${deviceSerial}`);
+      this.socket.emit('subscribe', deviceSerial);
+    }
+  }
+
+  unsubscribeFromDevice(deviceSerial: string): void {
+    this.deviceUpdateCallbacks.delete(deviceSerial);
+  }
+
+  isStreamingConnected(): boolean {
+    return this.socket?.connected || false;
+  }
+
   destroy(): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
+    }
+
+    if (this.socket) {
+      this.log.debug('Disconnecting streaming connection');
+      this.socket.disconnect();
+      this.socket = null;
     }
   }
 }

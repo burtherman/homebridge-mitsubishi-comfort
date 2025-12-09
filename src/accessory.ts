@@ -57,6 +57,49 @@ export class KumoThermostatAccessory {
 
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
+
+    // Register for streaming updates
+    this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
+    this.platform.log.debug(`Registered streaming callback for ${this.deviceSerial}`);
+  }
+
+  // Handle streaming updates
+  private handleStreamingUpdate(deviceSerial: string, data: Partial<DeviceStatus>) {
+    // Validate that we have essential data before processing
+    if (data.roomTemp === undefined || data.roomTemp === null) {
+      this.platform.log.debug(`Streaming update for ${deviceSerial} missing essential data, skipping`);
+      return;
+    }
+
+    this.platform.log.debug(`Streaming update received for ${deviceSerial}: temp=${data.roomTemp}, mode=${data.operationMode}, power=${data.power}`);
+
+    // Convert streaming data format to zone format for processing
+    const zoneUpdate: Partial<Zone> = {
+      adapter: {
+        id: data.id || '',
+        deviceSerial: deviceSerial,
+        roomTemp: data.roomTemp!,
+        spHeat: data.spHeat!,
+        spCool: data.spCool!,
+        spAuto: data.spAuto || null,
+        humidity: data.humidity || null,
+        power: data.power!,
+        operationMode: data.operationMode!,
+        previousOperationMode: data.operationMode!,
+        fanSpeed: data.fanSpeed || 'auto',
+        airDirection: data.airDirection || 'auto',
+        connected: true,
+        isSimulator: false,
+        hasSensor: data.humidity !== null && data.humidity !== undefined,
+        hasMhk2: false,
+        scheduleOwner: 'adapter',
+        scheduleHoldEndTime: 0,
+        rssi: data.rssi,
+      },
+    } as Zone;
+
+    // Use existing update processing logic
+    this.processZoneUpdate(zoneUpdate as Zone);
   }
 
   // Getter methods for platform to access private properties
@@ -411,6 +454,10 @@ export class KumoThermostatAccessory {
   }
 
   destroy() {
+    // Unsubscribe from streaming updates
+    this.kumoAPI.unsubscribeFromDevice(this.deviceSerial);
+    this.platform.log.debug(`Unsubscribed from streaming updates for ${this.deviceSerial}`);
+
     // Note: No per-device polling timer to clean up
     // Polling is handled at the platform level
   }

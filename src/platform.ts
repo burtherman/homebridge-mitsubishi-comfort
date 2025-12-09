@@ -213,7 +213,20 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       this.log.info('Device discovery completed');
 
-      // Start site-level polling for all unique sites
+      // Start streaming for all devices
+      const allDeviceSerials = discoveredDevices.map(d => d.deviceSerial);
+      if (allDeviceSerials.length > 0) {
+        this.log.info('Starting streaming for real-time updates...');
+        const streamingStarted = await this.kumoAPI.startStreaming(allDeviceSerials);
+
+        if (streamingStarted) {
+          this.log.info('✓ Streaming enabled - devices will update in real-time');
+        } else {
+          this.log.warn('Streaming failed to start - falling back to polling');
+        }
+      }
+
+      // Start site-level polling for all unique sites (as fallback)
       const uniqueSites = new Set(discoveredDevices.map(d =>
         this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
       ).filter(Boolean));
