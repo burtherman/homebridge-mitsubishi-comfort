@@ -12,6 +12,7 @@ export interface KumoConfig {
   username: string;
   password: string;
   pollInterval?: number;
+  disablePolling?: boolean;
   debug?: boolean;
   excludeDevices?: string[];
 }

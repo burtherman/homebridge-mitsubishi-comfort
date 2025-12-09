@@ -136,9 +136,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           const deviceSerial = zone.adapter.deviceSerial;
           const displayName = zone.name;
 
-          // Skip excluded devices
+          // Skip hidden devices
           if (this.kumoConfig.excludeDevices?.includes(deviceSerial)) {
-            this.log.info(`Skipping excluded device: ${displayName} (${deviceSerial})`);
+            this.log.info(`Hiding device from HomeKit: ${displayName} (${deviceSerial})`);
             continue;
           }
 
@@ -227,12 +227,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
 
       // Start site-level polling for all unique sites (as fallback)
-      const uniqueSites = new Set(discoveredDevices.map(d =>
-        this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
-      ).filter(Boolean));
+      if (!this.kumoConfig.disablePolling) {
+        const uniqueSites = new Set(discoveredDevices.map(d =>
+          this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
+        ).filter(Boolean));
 
-      for (const siteId of uniqueSites) {
-        this.startSitePoller(siteId as string);
+        for (const siteId of uniqueSites) {
+          this.startSitePoller(siteId as string);
+        }
+      } else {
+        this.log.warn('Polling disabled - relying entirely on streaming for device updates');
+        this.log.warn('If streaming disconnects, device status may become stale');
       }
     } catch (error) {
       this.log.error('Error during device discovery:', error);

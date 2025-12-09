@@ -33,6 +33,12 @@
         "minimum": 5,
         "description": "How often to poll device status (minimum 5 seconds)"
       },
+      "disablePolling": {
+        "title": "Disable Polling",
+        "type": "boolean",
+        "default": false,
+        "description": "Disable fallback polling and rely entirely on streaming for updates (not recommended)"
+      },
       "debug": {
         "title": "Debug Mode",
         "type": "boolean",
@@ -40,13 +46,16 @@
         "description": "Enable verbose debug logging (requires running Homebridge with -D flag)"
       },
       "excludeDevices": {
-        "title": "Excluded Devices",
+        "title": "Hide Device IDs",
         "type": "array",
+        "uniqueItems": true,
         "items": {
           "type": "string",
-          "title": "Device Serial Number"
+          "title": "Device Serial Number",
+          "placeholder": "e.g., 9X34P008S100095F",
+          "description": "Enter device serial number to hide"
         },
-        "description": "List of device serial numbers to exclude from HomeKit"
+        "description": "Device serial numbers to hide from HomeKit (found in logs during device discovery)"
       }
     }
   },
@@ -62,7 +71,23 @@
       "title": "Advanced Settings",
       "expandable": true,
       "expanded": false,
-      "items": ["pollInterval", "excludeDevices", "debug"]
+      "items": [
+        "pollInterval",
+        "disablePolling",
+        {
+          "key": "excludeDevices",
+          "type": "array",
+          "title": "Hide Device IDs",
+          "buttonText": "Add Device Serial",
+          "items": [
+            {
+              "type": "string",
+              "placeholder": "e.g., 9X34P008S100095F"
+            }
+          ]
+        },
+        "debug"
+      ]
     }
   ]
 }
