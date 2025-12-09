@@ -79,7 +79,7 @@ export interface DeviceStatus {
 export interface Commands {
   spHeat?: number;
   spCool?: number;
-  operationMode?: 'off' | 'heat' | 'cool' | 'auto';
+  operationMode?: 'off' | 'heat' | 'cool' | 'auto' | 'vent' | 'dry';
   fanSpeed?: 'auto' | 'low' | 'medium' | 'high';
 }
 
