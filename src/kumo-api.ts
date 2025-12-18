@@ -349,6 +349,13 @@ export class KumoAPI {
       if (this.debugMode) {
         this.log.info(`← API Response: 200 (${duration}ms)`);
         this.log.info(`  Fetched ${zones.length} zone(s) for site ${siteId}`);
+
+        // Log raw JSON for each zone to see all available fields
+        zones.forEach(zone => {
+          this.log.info(`  RAW Zone JSON for ${zone.name}:`);
+          this.log.info(JSON.stringify(zone, null, 2));
+        });
+
         zones.forEach(zone => {
           const a = zone.adapter;
           this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
@@ -372,7 +379,15 @@ export class KumoAPI {
 
   async getDeviceStatus(deviceSerial: string): Promise<DeviceStatus | null> {
     this.log.debug(`Fetching status for device: ${deviceSerial}`);
-    return await this.makeAuthenticatedRequest<DeviceStatus>(`/devices/${deviceSerial}/status`);
+    const status = await this.makeAuthenticatedRequest<DeviceStatus>(`/devices/${deviceSerial}/status`);
+
+    // Log raw JSON to see all available fields
+    if (this.debugMode && status) {
+      this.log.info(`  RAW Device Status JSON for ${deviceSerial}:`);
+      this.log.info(JSON.stringify(status, null, 2));
+    }
+
+    return status;
   }
 
   async sendCommand(deviceSerial: string, commands: Commands): Promise<boolean> {
@@ -462,6 +477,9 @@ export class KumoAPI {
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
+          // Log raw streaming update JSON to see all available fields
+          this.log.info(`  RAW Streaming Update JSON for ${deviceSerial}:`);
+          this.log.info(JSON.stringify(data, null, 2));
         }
 
         // Trigger callbacks for this device

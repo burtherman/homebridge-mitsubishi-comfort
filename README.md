@@ -1,16 +1,24 @@
-# Homebridge Kumo v3 Plugin
+# Homebridge Mitsubishi Comfort
 
 A Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API.
 
+## ⚠️ Disclaimer
+
+This plugin is not affiliated with, endorsed by, or associated with Mitsubishi Electric in any way. It is an independent, unofficial plugin developed by the community for personal use.
+
+**Use at your own risk.** The author assumes no liability for any damage, data loss, or issues that may arise from using this plugin. By using this plugin, you acknowledge that you do so entirely at your own discretion and risk.
+
 ## Features
 
+- **Real-time streaming updates** via Socket.IO for instant status changes
 - Full HomeKit thermostat integration
 - Support for Heat, Cool, Auto, and Off modes
 - Temperature control
 - Current temperature and humidity display
 - Automatic token refresh
-- Status polling every 30 seconds
+- Fallback polling (configurable interval, default 30 seconds)
 - Multi-site and multi-zone support
+- Device exclusion/hiding support
 
 ## Installation
 
@@ -61,8 +69,25 @@ Add the following to your Homebridge `config.json`:
 | `username` | string | Yes | Your Kumo Cloud email address |
 | `password` | string | Yes | Your Kumo Cloud password |
 | `pollInterval` | number | No | Status polling interval in seconds (default: 30) |
-| `excludeDevices` | string[] | No | Array of device serial numbers to exclude |
+| `disablePolling` | boolean | No | Disable fallback polling and rely entirely on streaming (not recommended, default: false) |
+| `excludeDevices` | string[] | No | Array of device serial numbers to hide from HomeKit |
 | `debug` | boolean | No | Enable debug logging (default: false) |
+
+### Debug Mode
+
+When `debug: true` is enabled, the plugin will log detailed information including:
+
+- API requests and responses with timing information
+- Raw JSON data from zone/device API responses showing all available fields
+- Real-time streaming updates with complete device state
+- Authentication and token refresh events
+- WebSocket connection status
+
+**Note:** Debug mode may log sensitive information and should only be enabled for troubleshooting. The plugin will display a warning when debug mode is active.
+
+### Known Limitations
+
+- **Outdoor Temperature**: The Kumo Cloud API does not expose outdoor temperature data from the outdoor units. While outdoor units have temperature sensors (used for defrost cycles), this data is only available through direct CN105 serial connections, not through the cloud API.
 
 ## Development
 
@@ -85,8 +110,9 @@ This will compile TypeScript, link the plugin, and restart on changes.
 1. **Authentication**: The plugin logs in to the Kumo Cloud v3 API using your credentials
 2. **Token Management**: Access tokens are automatically refreshed every 15 minutes
 3. **Discovery**: All sites and zones are discovered and registered as HomeKit thermostats
-4. **Polling**: Device status is polled every 30 seconds to keep HomeKit in sync
-5. **Control**: Changes made in HomeKit are sent to the Kumo Cloud API
+4. **Real-time Streaming**: Establishes Socket.IO connection for instant device updates
+5. **Fallback Polling**: Device status is polled every 30 seconds as a backup to streaming
+6. **Control**: Changes made in HomeKit are sent to the Kumo Cloud API
 
 ## Supported Characteristics
 
@@ -99,11 +125,17 @@ This will compile TypeScript, link the plugin, and restart on changes.
 
 ## API Endpoints Used
 
+### REST API
 - `POST /v3/login` - Authentication
 - `GET /v3/sites` - Get all sites
 - `GET /v3/sites/{siteId}/zones` - Get zones for a site
 - `GET /v3/devices/{deviceSerial}/status` - Get device status
 - `POST /v3/devices/send-command` - Send commands to device
+
+### Socket.IO Streaming
+- `wss://socket-prod.kumocloud.com` - Real-time device updates via Socket.IO
+- Emits `subscribe` event with device serial to receive updates
+- Receives `device_update` events with full device state
 
 ## Security
 
@@ -143,7 +175,21 @@ This will compile TypeScript, link the plugin, and restart on changes.
 
 ## License
 
-MIT
+Apache License 2.0
+
+Copyright 2024
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
 ## Credits
 
