@@ -185,6 +185,10 @@ export class KumoThermostatAccessory {
 
       const targetTemp = this.getTargetTempFromStatus(status);
       if (targetTemp !== undefined && targetTemp !== null && !isNaN(targetTemp)) {
+        // Log temperature returned from API for comparison
+        const targetTempF = (targetTemp * 9/5) + 32;
+        this.platform.log.info(`[TEMP UPDATE] ${this.accessory.displayName}: API returned target ${targetTemp.toFixed(3)}°C (${targetTempF.toFixed(1)}°F) [mode: ${status.operationMode}]`);
+
         this.service.updateCharacteristic(
           this.platform.Characteristic.TargetTemperature,
           targetTemp,
@@ -382,7 +386,10 @@ export class KumoThermostatAccessory {
 
   async setTargetTemperature(value: CharacteristicValue) {
     const temp = value as number;
-    this.platform.log.info(`Setting ${this.accessory.displayName} target temp to ${temp}°C`);
+
+    // Convert to Fahrenheit for logging
+    const tempF = (temp * 9/5) + 32;
+    this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: HomeKit sent ${temp.toFixed(3)}°C (${tempF.toFixed(1)}°F)`);
 
     if (!this.currentStatus) {
       this.platform.log.error('Cannot set temperature - no current status');
@@ -405,9 +412,13 @@ export class KumoThermostatAccessory {
       commands.spHeat = temp;
     }
 
+    this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Sending to API: ${JSON.stringify(commands)}°C`);
+
     const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
 
     if (success) {
+      this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Command accepted by API`);
+
       // Optimistic update - immediately update local state
       if (this.currentStatus) {
         if (commands.spHeat !== undefined) {

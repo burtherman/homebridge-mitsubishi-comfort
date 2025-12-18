@@ -89,6 +89,20 @@ When `debug: true` is enabled, the plugin will log detailed information includin
 
 - **Outdoor Temperature**: The Kumo Cloud API does not expose outdoor temperature data from the outdoor units. While outdoor units have temperature sensors (used for defrost cycles), this data is only available through direct CN105 serial connections, not through the cloud API.
 
+- **Temperature Display Differences**: Mitsubishi and Apple use different Fahrenheit-to-Celsius conversion tables, which can cause temperature setpoints to display differently in each app:
+
+  **When you set 70°F in Apple Home:**
+  - HomeKit converts using standard math: 70°F → 21.111°C
+  - Your unit is set to exactly 21.111°C (70.0°F)
+  - Mitsubishi Comfort app may display this as ~69°F due to their custom conversion table
+
+  **When you set 70°F in Mitsubishi Comfort app:**
+  - Mitsubishi converts using their custom table: 70°F → 21.5°C (0.5°C increments)
+  - Your unit is set to 21.5°C (which equals 70.7°F in standard conversion)
+  - Apple Home displays this as 71°F (because 21.5°C = 70.7°F)
+
+  **Both apps are technically correct** - they just use different conversion standards. The actual Celsius value sent to your unit is accurate in both cases. For consistency, pick one app for temperature control rather than mixing both.
+
 ## Development
 
 ### Build
