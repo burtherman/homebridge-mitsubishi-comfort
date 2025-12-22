@@ -51,9 +51,8 @@ export class KumoThermostatAccessory {
       .onGet(this.getTargetTemperature.bind(this))
       .onSet(this.setTargetTemperature.bind(this));
 
-    this.service.getCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits)
-      .onGet(this.getTemperatureDisplayUnits.bind(this))
-      .onSet(this.setTemperatureDisplayUnits.bind(this));
+    // Note: TemperatureDisplayUnits characteristic is not exposed since the temperature
+    // unit preference is account-wide in Kumo Cloud, not per-device
 
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
@@ -187,7 +186,7 @@ export class KumoThermostatAccessory {
       if (targetTemp !== undefined && targetTemp !== null && !isNaN(targetTemp)) {
         // Log temperature returned from API for comparison
         const targetTempF = (targetTemp * 9/5) + 32;
-        this.platform.log.info(`[TEMP UPDATE] ${this.accessory.displayName}: API returned target ${targetTemp.toFixed(3)}°C (${targetTempF.toFixed(1)}°F) [mode: ${status.operationMode}]`);
+        this.platform.log.debug(`[TEMP UPDATE] ${this.accessory.displayName}: API returned target ${targetTemp.toFixed(3)}°C (${targetTempF.toFixed(1)}°F) [mode: ${status.operationMode}]`);
 
         this.service.updateCharacteristic(
           this.platform.Characteristic.TargetTemperature,
@@ -441,15 +440,6 @@ export class KumoThermostatAccessory {
     }
   }
 
-  async getTemperatureDisplayUnits(): Promise<CharacteristicValue> {
-    // Default to Celsius
-    return this.platform.Characteristic.TemperatureDisplayUnits.CELSIUS;
-  }
-
-  async setTemperatureDisplayUnits(value: CharacteristicValue) {
-    this.platform.log.debug('Set TemperatureDisplayUnits:', value);
-    // We don't actually need to do anything here as the API uses Celsius
-  }
 
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
     if (!this.currentStatus) {

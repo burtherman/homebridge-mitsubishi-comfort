@@ -94,6 +94,7 @@ export class KumoAPI {
       this.accessToken = data.token.access;
       this.refreshToken = data.token.refresh;
 
+
       // JWT tokens typically expire in 20 minutes, we'll refresh at 15 minutes
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
 
