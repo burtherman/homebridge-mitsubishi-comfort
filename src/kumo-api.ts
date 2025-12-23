@@ -33,6 +33,14 @@ export class KumoAPI {
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
 
+  // Streaming health tracking
+  private lastStreamingUpdate: Map<string, number> = new Map();
+  private streamingHealthCallbacks: Set<(isHealthy: boolean) => void> = new Set();
+  private healthCheckTimer: NodeJS.Timeout | null = null;
+  private streamingHealthCheckInterval: number = 30000; // 30s default
+  private streamingStaleThreshold: number = 60000; // 60s default
+  private isStreamingHealthy: boolean = false;
+
   constructor(
     private readonly username: string,
     private readonly password: string,
@@ -468,6 +476,20 @@ export class KumoAPI {
           this.log.debug(`Subscribing to device: ${deviceSerial}`);
           this.socket?.emit('subscribe', deviceSerial);
         }
+
+        // Initialize timestamps for all subscribed devices
+        for (const deviceSerial of deviceSerials) {
+          this.lastStreamingUpdate.set(deviceSerial, Date.now());
+        }
+
+        // Mark as healthy and start health checks
+        this.isStreamingHealthy = true;
+        this.notifyHealthChange(false, true);
+        this.startHealthChecks();
+
+        // LOG: Streaming started
+        this.log.info('✓ Streaming connection established');
+        this.log.info(`Monitoring ${deviceSerials.length} device(s) for real-time updates`);
       });
 
       this.socket.on('device_update', (data: any) => {
@@ -475,6 +497,9 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
+
+        // Track update timestamp for health monitoring
+        this.updateStreamingTimestamp(deviceSerial);
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -491,14 +516,22 @@ export class KumoAPI {
       });
 
       this.socket.on('disconnect', (reason) => {
-        this.log.warn(`Streaming disconnected: ${reason}`);
+        this.log.warn(`✗ Streaming disconnected: ${reason}`);
+
+        // Mark as unhealthy immediately
+        const wasHealthy = this.isStreamingHealthy;
+        this.isStreamingHealthy = false;
+        this.notifyHealthChange(wasHealthy, false);
+
+        // Stop health checks while disconnected
+        this.stopHealthChecks();
 
         // Attempt to reconnect if not a manual disconnect
         if (reason !== 'io client disconnect' && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
           this.log.info(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
         } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          this.log.error('Max reconnect attempts reached - falling back to polling');
+          this.log.error('Max reconnect attempts reached - polling will handle updates');
         }
       });
 
@@ -533,11 +566,99 @@ export class KumoAPI {
     return this.socket?.connected || false;
   }
 
+  /**
+   * Set streaming health check intervals
+   */
+  setStreamingHealthConfig(checkInterval: number, staleThreshold: number): void {
+    this.streamingHealthCheckInterval = checkInterval * 1000;
+    this.streamingStaleThreshold = staleThreshold * 1000;
+    this.log.debug(`Streaming health config: check every ${checkInterval}s, stale after ${staleThreshold}s`);
+  }
+
+  /**
+   * Register callback for streaming health changes
+   */
+  onStreamingHealthChange(callback: (isHealthy: boolean) => void): void {
+    this.streamingHealthCallbacks.add(callback);
+  }
+
+  /**
+   * Get current streaming health status
+   */
+  getStreamingHealth(): boolean {
+    return this.isStreamingHealthy;
+  }
+
+  /**
+   * Update last streaming update timestamp for a device
+   */
+  private updateStreamingTimestamp(deviceSerial: string): void {
+    this.lastStreamingUpdate.set(deviceSerial, Date.now());
+  }
+
+  /**
+   * Check if streaming is healthy (socket connected)
+   * Note: Socket.io has built-in heartbeats and will fire disconnect events
+   * if the connection is lost. We don't need to check data freshness since
+   * KumoCloud only sends updates when device state changes.
+   */
+  private checkStreamingHealth(): void {
+    const wasHealthy = this.isStreamingHealthy;
+
+    // Check if socket is connected
+    // Socket.io handles heartbeats automatically and will disconnect if connection is lost
+    this.isStreamingHealthy = this.isStreamingConnected();
+    this.notifyHealthChange(wasHealthy, this.isStreamingHealthy);
+  }
+
+  /**
+   * Notify listeners if health status changed
+   */
+  private notifyHealthChange(wasHealthy: boolean, isHealthy: boolean): void {
+    if (wasHealthy !== isHealthy) {
+      this.log.info(`Streaming health changed: ${wasHealthy ? 'healthy' : 'unhealthy'} → ${isHealthy ? 'healthy' : 'unhealthy'}`);
+      for (const callback of this.streamingHealthCallbacks) {
+        callback(isHealthy);
+      }
+    }
+  }
+
+  /**
+   * Start periodic health checks
+   */
+  private startHealthChecks(): void {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+    }
+
+    this.healthCheckTimer = setInterval(() => {
+      this.checkStreamingHealth();
+    }, this.streamingHealthCheckInterval);
+
+    this.log.debug('Started streaming health checks');
+  }
+
+  /**
+   * Stop periodic health checks
+   */
+  private stopHealthChecks(): void {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+
   destroy(): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
+
+    // Clean up streaming health monitoring
+    this.stopHealthChecks();
+    this.streamingHealthCallbacks.clear();
+    this.lastStreamingUpdate.clear();
+    this.log.debug('Streaming health monitoring stopped');
 
     if (this.socket) {
       this.log.debug('Disconnecting streaming connection');

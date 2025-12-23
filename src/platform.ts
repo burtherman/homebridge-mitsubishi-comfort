@@ -22,6 +22,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
+  private readonly degradedPollInterval: number;
+  private isStreamingHealthy: boolean = false;
+  private isDegradedMode: boolean = false;
 
   constructor(
     public readonly log: Logger,
@@ -59,12 +62,26 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
     }
 
+    // Configure degraded mode polling interval
+    this.degradedPollInterval = (kumoConfig.degradedPollInterval || 10) * 1000;
+    this.log.debug(`Degraded polling interval: ${this.degradedPollInterval / 1000}s`);
+
     this.kumoAPI = new KumoAPI(
       kumoConfig.username,
       kumoConfig.password,
       this.log,
       kumoConfig.debug || false,
     );
+
+    // Configure streaming health monitoring
+    const healthCheckInterval = kumoConfig.streamingHealthCheckInterval || 30;
+    const staleThreshold = kumoConfig.streamingStaleThreshold || 60;
+    this.kumoAPI.setStreamingHealthConfig(healthCheckInterval, staleThreshold);
+
+    // Register for streaming health changes
+    this.kumoAPI.onStreamingHealthChange((isHealthy: boolean) => {
+      this.handleStreamingHealthChange(isHealthy);
+    });
 
     this.api.on('didFinishLaunching', () => {
       log.debug('Executed didFinishLaunching callback');
@@ -224,20 +241,44 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         } else {
           this.log.warn('Streaming failed to start - falling back to polling');
         }
+
+        // Log startup configuration summary
+        const healthCheckInterval = this.kumoConfig.streamingHealthCheckInterval || 30;
+        const staleThreshold = this.kumoConfig.streamingStaleThreshold || 60;
+
+        this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        this.log.info('Mitsubishi Comfort Plugin Configuration');
+        this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        this.log.info(`Streaming: ${streamingStarted ? 'ENABLED' : 'DISABLED'}`);
+        this.log.info(`Polling mode: ${this.kumoConfig.disablePolling ? 'On-demand only' : 'Enabled'}`);
+        this.log.info(`Normal poll interval: ${(this.kumoConfig.pollInterval || 30)}s`);
+        this.log.info(`Degraded poll interval: ${this.degradedPollInterval / 1000}s`);
+        this.log.info(`Health check interval: ${healthCheckInterval}s`);
+        this.log.info(`Stale threshold: ${staleThreshold}s`);
+        this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+        if (streamingStarted) {
+          if (this.kumoConfig.disablePolling) {
+            this.log.info('Strategy: Streaming primary, polling fallback only');
+          } else {
+            this.log.info('Strategy: Streaming primary, polling supplemental');
+          }
+        }
       }
 
-      // Start site-level polling for all unique sites (as fallback)
+      // Start site-level polling based on configuration and streaming health
       if (!this.kumoConfig.disablePolling) {
         const uniqueSites = new Set(discoveredDevices.map(d =>
           this.accessories.find(a => a.UUID === d.uuid)?.context.device.siteId
         ).filter(Boolean));
 
+        this.log.info(`Initializing pollers for ${uniqueSites.size} site(s)`);
+
         for (const siteId of uniqueSites) {
           this.startSitePoller(siteId as string);
         }
       } else {
-        this.log.warn('Polling disabled - relying entirely on streaming for device updates');
-        this.log.warn('If streaming disconnects, device status may become stale');
+        this.log.info('Polling disabled - will activate only if streaming fails');
       }
     } catch (error) {
       this.log.error('Error during device discovery:', error);
@@ -250,7 +291,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       return;
     }
 
-    this.log.info(`Starting centralized poller for site: ${siteId}`);
+    // If streaming is healthy and polling is disabled, don't start
+    if (this.isStreamingHealthy && this.kumoConfig.disablePolling) {
+      this.log.info(`Skipping poller for site ${siteId} (streaming healthy, polling disabled)`);
+      return;
+    }
+
+    const interval = this.isDegradedMode ? this.degradedPollInterval : (this.kumoConfig.pollInterval || 30) * 1000;
+    const intervalSec = interval / 1000;
+    const mode = this.isDegradedMode ? 'DEGRADED' : 'NORMAL';
+
+    this.log.info(`Starting ${mode} poller for site ${siteId}: ${intervalSec}s intervals`);
 
     // Group accessories by site for efficient distribution
     const accessories = this.accessoryHandlers.filter(
@@ -262,17 +313,18 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.pollSite(siteId);
 
     // Then poll at regular intervals
-    const pollInterval = (this.kumoConfig.pollInterval || 30) * 1000;
     const timer = setInterval(() => {
       this.pollSite(siteId);
-    }, pollInterval);
+    }, interval);
 
     this.sitePollers.set(siteId, timer);
   }
 
   private async pollSite(siteId: string) {
     try {
-      this.log.debug(`Polling site: ${siteId}`);
+      const mode = this.isDegradedMode ? 'DEGRADED' : 'NORMAL';
+      const health = this.isStreamingHealthy ? 'healthy' : 'unhealthy';
+      this.log.debug(`[${mode}] Polling site ${siteId} (streaming: ${health})`);
 
       // Fetch all zones for this site
       const zones = await this.kumoAPI.getZones(siteId);
@@ -290,5 +342,117 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     } catch (error) {
       this.log.error(`Error polling site ${siteId}:`, error);
     }
+  }
+
+  /**
+   * Handle streaming health state changes
+   */
+  private handleStreamingHealthChange(isHealthy: boolean): void {
+    const wasHealthy = this.isStreamingHealthy;
+    this.isStreamingHealthy = isHealthy;
+
+    // If streaming became unhealthy, switch to degraded mode
+    if (wasHealthy && !isHealthy) {
+      this.log.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      this.log.warn('⚠ STREAMING INTERRUPTED');
+      this.log.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      this.enterDegradedMode();
+    }
+
+    // If streaming became healthy, exit degraded mode
+    if (!wasHealthy && isHealthy) {
+      this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      this.log.info('✓ STREAMING RESUMED');
+      this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      this.exitDegradedMode();
+    }
+  }
+
+  /**
+   * Enter degraded mode - start/speed up polling
+   */
+  private enterDegradedMode(): void {
+    if (this.isDegradedMode) {
+      return; // Already in degraded mode
+    }
+
+    this.isDegradedMode = true;
+
+    const intervalSec = this.degradedPollInterval / 1000;
+    this.log.warn(`→ Switching to DEGRADED MODE`);
+    this.log.warn(`→ Polling activated: ${intervalSec}s intervals`);
+    this.log.warn(`→ Updates will continue via API polling`);
+
+    // If polling is disabled, temporarily enable it
+    if (this.kumoConfig.disablePolling) {
+      this.log.warn('→ Overriding disablePolling setting for fallback');
+    }
+
+    // Restart all site pollers with degraded interval
+    this.restartAllPollers(this.degradedPollInterval);
+  }
+
+  /**
+   * Exit degraded mode - stop or slow down polling
+   */
+  private exitDegradedMode(): void {
+    if (!this.isDegradedMode) {
+      return; // Not in degraded mode
+    }
+
+    this.isDegradedMode = false;
+
+    // If polling was disabled in config, stop all pollers
+    if (this.kumoConfig.disablePolling) {
+      this.log.info('→ Returning to NORMAL MODE');
+      this.log.info('→ Polling halted (streaming active)');
+      this.log.info('→ Updates resume via real-time streaming');
+      this.stopAllPollers();
+    } else {
+      // Otherwise restart with normal interval
+      const normalInterval = (this.kumoConfig.pollInterval || 30) * 1000;
+      const normalSec = normalInterval / 1000;
+      this.log.info('→ Returning to NORMAL MODE');
+      this.log.info(`→ Polling reduced to ${normalSec}s intervals`);
+      this.log.info('→ Primary updates via streaming');
+      this.restartAllPollers(normalInterval);
+    }
+  }
+
+  /**
+   * Restart all site pollers with new interval
+   */
+  private restartAllPollers(intervalMs: number): void {
+    const intervalSec = intervalMs / 1000;
+
+    for (const [siteId, timer] of this.sitePollers) {
+      clearInterval(timer);
+
+      // Do immediate poll
+      this.pollSite(siteId);
+
+      // Start new interval
+      const newTimer = setInterval(() => {
+        this.pollSite(siteId);
+      }, intervalMs);
+
+      this.sitePollers.set(siteId, newTimer);
+      this.log.debug(`Poller restarted for site ${siteId}: ${intervalSec}s interval`);
+    }
+
+    const siteCount = this.sitePollers.size;
+    this.log.info(`✓ ${siteCount} site poller(s) active at ${intervalSec}s intervals`);
+  }
+
+  /**
+   * Stop all site pollers
+   */
+  private stopAllPollers(): void {
+    for (const [siteId, timer] of this.sitePollers) {
+      clearInterval(timer);
+      this.log.debug(`Poller stopped for site ${siteId}`);
+    }
+    this.sitePollers.clear();
+    this.log.info('✓ All polling halted');
   }
 }

@@ -31,13 +31,13 @@
         "type": "integer",
         "default": 30,
         "minimum": 5,
-        "description": "How often to poll device status (minimum 5 seconds)"
+        "description": "Polling interval when streaming is healthy (minimum 5 seconds, default 30)"
       },
       "disablePolling": {
         "title": "Disable Polling",
         "type": "boolean",
         "default": false,
-        "description": "Disable fallback polling and rely entirely on streaming for updates (not recommended)"
+        "description": "Disable polling when streaming is healthy (will auto-enable if streaming fails)"
       },
       "debug": {
         "title": "Debug Mode",
@@ -56,6 +56,30 @@
           "description": "Enter device serial number to hide"
         },
         "description": "Device serial numbers to hide from HomeKit (found in logs during device discovery)"
+      },
+      "streamingHealthCheckInterval": {
+        "title": "Streaming Health Check Interval (seconds)",
+        "type": "integer",
+        "default": 30,
+        "minimum": 10,
+        "maximum": 300,
+        "description": "How often to check if streaming is healthy (default: 30 seconds)"
+      },
+      "streamingStaleThreshold": {
+        "title": "Streaming Stale Threshold (seconds)",
+        "type": "integer",
+        "default": 60,
+        "minimum": 30,
+        "maximum": 600,
+        "description": "Consider streaming stale if no updates received for this long (default: 60 seconds)"
+      },
+      "degradedPollInterval": {
+        "title": "Degraded Mode Poll Interval (seconds)",
+        "type": "integer",
+        "default": 10,
+        "minimum": 5,
+        "maximum": 60,
+        "description": "Fast polling interval when streaming is unhealthy (default: 10 seconds)"
       }
     }
   },
@@ -73,7 +97,10 @@
       "expanded": false,
       "items": [
         "pollInterval",
+        "degradedPollInterval",
         "disablePolling",
+        "streamingHealthCheckInterval",
+        "streamingStaleThreshold",
         {
           "key": "excludeDevices",
           "type": "array",

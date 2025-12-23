@@ -12,6 +12,8 @@ export class KumoThermostatAccessory {
   private currentStatus: DeviceStatus | null = null;
   private pollIntervalMs: number;
   private hasHumiditySensor: boolean = false;
+  private lastUpdateTimestamp: number = 0;
+  private lastUpdateSource: 'streaming' | 'polling' | 'none' = 'none';
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -70,6 +72,8 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    const updateTimestamp = Date.now();
+
     this.platform.log.debug(`Streaming update received for ${deviceSerial}: temp=${data.roomTemp}, mode=${data.operationMode}, power=${data.power}`);
 
     // Convert streaming data format to zone format for processing
@@ -98,7 +102,7 @@ export class KumoThermostatAccessory {
     } as Zone;
 
     // Use existing update processing logic
-    this.processZoneUpdate(zoneUpdate as Zone);
+    this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
   }
 
   // Getter methods for platform to access private properties
@@ -112,11 +116,29 @@ export class KumoThermostatAccessory {
 
   // Called by platform when new zone data is available
   public updateFromZone(zone: Zone) {
-    this.processZoneUpdate(zone);
+    const updateTimestamp = Date.now();
+    this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
-  private processZoneUpdate(zone: Zone) {
+  private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling', timestamp: number) {
     try {
-      this.platform.log.debug(`Processing zone update for ${this.deviceSerial}`);
+      // Prevent old updates from overwriting newer ones
+      if (timestamp < this.lastUpdateTimestamp) {
+        this.platform.log.debug(
+          `[${this.deviceSerial}] Ignoring ${source} update: ` +
+          `${this.lastUpdateTimestamp - timestamp}ms older than last ${this.lastUpdateSource} update`
+        );
+        return;
+      }
+
+      this.lastUpdateTimestamp = timestamp;
+      const previousSource = this.lastUpdateSource;
+      this.lastUpdateSource = source;
+
+      if (previousSource !== source && previousSource !== 'none') {
+        this.platform.log.debug(`[${this.deviceSerial}] Update source changed: ${previousSource} → ${source}`);
+      }
+
+      this.platform.log.debug(`Processing ${source} update for ${this.deviceSerial}`);
 
       // Validate required fields
       if (zone.adapter.roomTemp === undefined || zone.adapter.roomTemp === null) {
@@ -347,14 +369,18 @@ export class KumoThermostatAccessory {
       if (status) {
         this.currentStatus = status;
       } else {
-        this.platform.log.warn('No status available for getCurrentTemperature');
+        // Initial state - no data yet, return default silently
+        this.platform.log.debug('No status available yet for getCurrentTemperature, returning default');
         return 20; // Default fallback temperature
       }
     }
 
     const temp = this.currentStatus.roomTemp;
     if (temp === undefined || temp === null || isNaN(temp)) {
-      this.platform.log.warn('Invalid roomTemp value:', temp);
+      // Only warn if we have status but invalid temp (not initial state)
+      if (this.lastUpdateSource !== 'none') {
+        this.platform.log.warn(`Invalid roomTemp value for ${this.accessory.displayName}:`, temp);
+      }
       return 20; // Default fallback temperature
     }
 
@@ -368,14 +394,18 @@ export class KumoThermostatAccessory {
       if (status) {
         this.currentStatus = status;
       } else {
-        this.platform.log.warn('No status available for getTargetTemperature');
+        // Initial state - no data yet, return default silently
+        this.platform.log.debug('No status available yet for getTargetTemperature, returning default');
         return 20; // Default fallback temperature
       }
     }
 
     const temp = this.getTargetTempFromStatus(this.currentStatus);
     if (temp === undefined || temp === null || isNaN(temp)) {
-      this.platform.log.warn('Invalid target temperature value:', temp);
+      // Only warn if we have status but invalid temp (not initial state)
+      if (this.lastUpdateSource !== 'none') {
+        this.platform.log.warn(`Invalid target temperature value for ${this.accessory.displayName}:`, temp);
+      }
       return 20; // Default fallback temperature
     }
 

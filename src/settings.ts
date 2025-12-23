@@ -15,6 +15,9 @@ export interface KumoConfig {
   disablePolling?: boolean;
   debug?: boolean;
   excludeDevices?: string[];
+  streamingHealthCheckInterval?: number;
+  streamingStaleThreshold?: number;
+  degradedPollInterval?: number;
 }
 
 export interface LoginResponse {
