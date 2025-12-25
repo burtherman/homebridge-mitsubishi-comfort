@@ -283,9 +283,10 @@ export class KumoAPI {
 
       if (!response.ok) {
         this.log.error(`Request failed with status: ${response.status}`);
-        if (this.debugMode) {
-          const errorText = await response.text();
-          this.log.info(`  Error response: ${errorText}`);
+        const errorText = await response.text();
+        // Always log 400 errors to see API validation messages
+        if (this.debugMode || response.status === 400) {
+          this.log.error(`  Error response: ${errorText}`);
         }
         return null;
       }

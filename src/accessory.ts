@@ -327,30 +327,39 @@ export class KumoThermostatAccessory {
     this.platform.log.debug('Set TargetHeatingCoolingState:', value);
 
     let operationMode: 'off' | 'heat' | 'cool' | 'auto';
+    let modeName: string;
 
     switch (value) {
       case this.platform.Characteristic.TargetHeatingCoolingState.OFF:
         operationMode = 'off';
+        modeName = 'OFF';
         break;
       case this.platform.Characteristic.TargetHeatingCoolingState.HEAT:
         operationMode = 'heat';
+        modeName = 'HEAT';
         break;
       case this.platform.Characteristic.TargetHeatingCoolingState.COOL:
         operationMode = 'cool';
+        modeName = 'COOL';
         break;
       case this.platform.Characteristic.TargetHeatingCoolingState.AUTO:
         operationMode = 'auto';
+        modeName = 'AUTO';
         break;
       default:
         this.platform.log.error('Unknown target heating cooling state:', value);
         return;
     }
 
+    this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${modeName} mode`);
+
     const success = await this.kumoAPI.sendCommand(this.deviceSerial, {
       operationMode,
     });
 
     if (success) {
+      this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: Command accepted by API`);
+
       // Optimistic update - immediately update local state
       if (this.currentStatus) {
         this.currentStatus.operationMode = operationMode;
@@ -359,7 +368,7 @@ export class KumoThermostatAccessory {
 
       // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
-      this.platform.log.error(`Failed to set target heating cooling state for ${this.accessory.displayName}`);
+      this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${modeName}`);
     }
   }
 
