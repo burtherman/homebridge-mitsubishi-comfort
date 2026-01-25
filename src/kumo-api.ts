@@ -41,6 +41,15 @@ export class KumoAPI {
   private streamingStaleThreshold: number = 60000; // 60s default
   private isStreamingHealthy: boolean = false;
 
+  // Rate limiting and retry tracking
+  private refreshRetryCount: number = 0;
+  private lastRefreshAttempt: number = 0;
+  private loginRetryCount: number = 0;
+  private lastLoginAttempt: number = 0;
+  private readonly maxRetryAttempts: number = 5;
+  private readonly baseRetryDelay: number = 5000; // 5 seconds
+  private readonly minLoginInterval: number = 10000; // Minimum 10 seconds between login attempts
+
   constructor(
     private readonly username: string,
     private readonly password: string,
@@ -70,6 +79,16 @@ export class KumoAPI {
   }
 
   async login(): Promise<boolean> {
+    // Enforce minimum interval between login attempts to avoid rate limiting
+    const timeSinceLastLogin = Date.now() - this.lastLoginAttempt;
+    if (this.lastLoginAttempt > 0 && timeSinceLastLogin < this.minLoginInterval) {
+      const waitTime = this.minLoginInterval - timeSinceLastLogin;
+      this.log.warn(`Rate limit protection: waiting ${Math.round(waitTime / 1000)}s before login attempt`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
+    this.lastLoginAttempt = Date.now();
+
     try {
       this.log.debug('Attempting to login to Kumo Cloud API');
 
@@ -89,11 +108,34 @@ export class KumoAPI {
 
       if (!response.ok) {
         const errorText = await response.text();
+
+        // Handle rate limiting
+        if (response.status === 429) {
+          this.loginRetryCount++;
+          this.log.error(`Login rate limited (429). Retry count: ${this.loginRetryCount}`);
+
+          if (this.loginRetryCount >= this.maxRetryAttempts) {
+            this.log.error(`Login retry limit reached (${this.maxRetryAttempts} attempts). Giving up.`);
+            this.loginRetryCount = 0;
+            return false;
+          }
+
+          // Wait with exponential backoff before retrying
+          const backoffDelay = Math.min(
+            this.baseRetryDelay * Math.pow(2, this.loginRetryCount),
+            120000, // Cap at 2 minutes
+          );
+          this.log.warn(`Retrying login in ${Math.round(backoffDelay / 1000)}s...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          return await this.login();
+        }
+
         this.log.error(`Login failed with status: ${response.status}`);
         // Only log response body in debug mode, as it may contain sensitive info
         if (this.debugMode && errorText) {
           this.log.debug(`Login error response: ${errorText}`);
         }
+        this.loginRetryCount = 0;
         return false;
       }
 
@@ -102,6 +144,9 @@ export class KumoAPI {
       this.accessToken = data.token.access;
       this.refreshToken = data.token.refresh;
 
+      // Reset retry counters on successful login
+      this.loginRetryCount = 0;
+      this.refreshRetryCount = 0;
 
       // JWT tokens typically expire in 20 minutes, we'll refresh at 15 minutes
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
@@ -121,6 +166,7 @@ export class KumoAPI {
       } else {
         this.log.error('Login error: Unknown error occurred');
       }
+      this.loginRetryCount = 0;
       return false;
     }
   }
@@ -145,6 +191,23 @@ export class KumoAPI {
       return await this.login();
     }
 
+    // Check if we need to wait due to rate limiting
+    const timeSinceLastAttempt = Date.now() - this.lastRefreshAttempt;
+    if (this.refreshRetryCount > 0) {
+      const backoffDelay = Math.min(
+        this.baseRetryDelay * Math.pow(2, this.refreshRetryCount - 1),
+        60000, // Cap at 60 seconds
+      );
+
+      if (timeSinceLastAttempt < backoffDelay) {
+        const waitTime = backoffDelay - timeSinceLastAttempt;
+        this.log.warn(`Rate limit backoff: waiting ${Math.round(waitTime / 1000)}s before retry attempt ${this.refreshRetryCount + 1}/${this.maxRetryAttempts}`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+
+    this.lastRefreshAttempt = Date.now();
+
     try {
       this.log.debug('Refreshing access token');
 
@@ -163,7 +226,25 @@ export class KumoAPI {
       if (!response.ok) {
         const errorText = await response.text();
         this.log.warn(`Token refresh failed (${response.status}): ${errorText}`);
+
+        // Handle rate limiting specifically
+        if (response.status === 429) {
+          this.refreshRetryCount++;
+
+          if (this.refreshRetryCount >= this.maxRetryAttempts) {
+            this.log.error(`Rate limit retry limit reached (${this.maxRetryAttempts} attempts). Falling back to full login.`);
+            this.refreshRetryCount = 0; // Reset for next cycle
+            return await this.login();
+          }
+
+          // Retry with exponential backoff
+          this.log.warn(`Rate limited. Will retry with exponential backoff (attempt ${this.refreshRetryCount}/${this.maxRetryAttempts})`);
+          return await this.refreshAccessToken();
+        }
+
+        // For other errors, attempt full login
         this.log.warn('Attempting full login');
+        this.refreshRetryCount = 0;
         return await this.login();
       }
 
@@ -173,6 +254,9 @@ export class KumoAPI {
       this.accessToken = data.access;
       this.refreshToken = data.refresh;
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
+
+      // Reset retry count on success
+      this.refreshRetryCount = 0;
 
       this.log.debug('Access token refreshed successfully');
 
@@ -186,6 +270,7 @@ export class KumoAPI {
       } else {
         this.log.error('Token refresh error: Unknown error occurred');
       }
+      this.refreshRetryCount = 0;
       return await this.login();
     }
   }
