@@ -188,7 +188,12 @@ export class KumoAPI {
     }
 
     // Schedule refresh 5 minutes before expiry (TOKEN_REFRESH_INTERVAL is 20 min, so this is at 15 min mark)
-    const refreshIn = TOKEN_REFRESH_INTERVAL - (5 * 60 * 1000);
+    // Add random jitter (0-60 seconds) to avoid predictable timing that triggers rate limits
+    const baseRefreshIn = TOKEN_REFRESH_INTERVAL - (5 * 60 * 1000);
+    const jitter = Math.floor(Math.random() * 60000); // 0-60 seconds random jitter
+    const refreshIn = baseRefreshIn + jitter;
+
+    this.log.debug(`Token refresh scheduled in ${Math.round(refreshIn / 1000)}s (includes ${Math.round(jitter / 1000)}s jitter)`);
 
     this.refreshTimer = setTimeout(async () => {
       this.log.debug('Refreshing access token');
