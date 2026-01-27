@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.3.2
+**Current Version:** 1.3.5
 
 ## Architecture Overview
 
@@ -344,6 +344,22 @@ When making changes, verify:
 
 ## Version History
 
+- **1.3.5** - Token refresh jitter to prevent rate limits (January 2026)
+  - Added random 0-60 second jitter to token refresh timing
+  - Prevents predictable API calls that trigger 429 rate limit errors
+  - Code: `kumo-api.ts:188-202`
+- **1.3.4** - Silent routine reconnect logging (January 2026)
+  - Routine token refresh reconnections now debug-level only
+  - Initial connections and actual errors remain at info level
+  - Cleaner logs when streaming is working normally
+- **1.3.3** - Streaming architecture improvements (January 2026)
+  - Socket reconnect after every token refresh (ensures fresh token is used)
+  - Added 10-second hysteresis before exiting degraded mode
+  - Added 20-second socket connection timeout
+  - Removed unused vestigial code (reconnectAttempts, lastStreamingUpdate)
+  - Added device serial validation before subscribe
+  - Suppresses spurious "STREAMING INTERRUPTED" during planned reconnects
+  - Code: `kumo-api.ts:39-40, 796-827`, `platform.ts:25-27, 343-458`
 - **1.3.2** - Rate limit handling with exponential backoff (January 2025)
   - Added intelligent rate limit detection for 429 errors
   - Implemented exponential backoff for token refresh (5s → 60s max)
