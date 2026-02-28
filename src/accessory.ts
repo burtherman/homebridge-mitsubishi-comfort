@@ -187,6 +187,11 @@ export class KumoThermostatAccessory {
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
       this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (target: ${this.getTargetTempFromStatus(status)}°C, mode: ${status.operationMode})`);
 
+      // Log auto sub-mode variants for diagnostics
+      if (this.isAutoMode(status.operationMode) && status.operationMode !== 'auto') {
+        this.platform.log.info(`[AUTO MODE] ${this.accessory.displayName}: API returned auto sub-mode '${status.operationMode}' (mapped to AUTO)`);
+      }
+
       // Update all characteristics
       this.service.updateCharacteristic(
         this.platform.Characteristic.CurrentHeatingCoolingState,
@@ -230,6 +235,10 @@ export class KumoThermostatAccessory {
     }
   }
 
+  private isAutoMode(operationMode: string): boolean {
+    return operationMode.startsWith('auto');
+  }
+
   private mapToCurrentHeatingCoolingState(status: DeviceStatus): number {
     // If power is off, always return OFF
     if (status.power === 0) {
@@ -237,25 +246,23 @@ export class KumoThermostatAccessory {
     }
 
     // Map operation mode to HomeKit state
-    switch (status.operationMode) {
-      case 'heat':
+    if (status.operationMode === 'heat') {
+      return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
+    } else if (status.operationMode === 'cool') {
+      return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
+    } else if (this.isAutoMode(status.operationMode)) {
+      // For auto mode (including autoHeat/autoCool sub-modes), determine
+      // current action based on target vs current temperature
+      const targetTemp = this.getTargetTempFromStatus(status);
+      if (status.roomTemp < targetTemp) {
         return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-      case 'cool':
+      } else if (status.roomTemp > targetTemp) {
         return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'auto':
-        // For auto mode, we need to determine if it's currently heating or cooling
-        // based on target vs current temperature
-        const targetTemp = this.getTargetTempFromStatus(status);
-        if (status.roomTemp < targetTemp) {
-          return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-        } else if (status.roomTemp > targetTemp) {
-          return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-        }
-        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
-      case 'off':
-      default:
-        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
+      }
+      // At target temperature — unit is maintaining, report HEAT
+      return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
     }
+    return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
   }
 
   private mapToTargetHeatingCoolingState(status: DeviceStatus): number {
@@ -265,16 +272,14 @@ export class KumoThermostatAccessory {
     }
 
     // Map operation mode to HomeKit state
-    switch (status.operationMode) {
-      case 'heat':
-        return this.platform.Characteristic.TargetHeatingCoolingState.HEAT;
-      case 'cool':
-        return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
-      case 'auto':
-        return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
-      default:
-        return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
+    if (status.operationMode === 'heat') {
+      return this.platform.Characteristic.TargetHeatingCoolingState.HEAT;
+    } else if (status.operationMode === 'cool') {
+      return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
+    } else if (this.isAutoMode(status.operationMode)) {
+      return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
     }
+    return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
   }
 
   private getTargetTempFromStatus(status: DeviceStatus): number {
@@ -283,7 +288,7 @@ export class KumoThermostatAccessory {
       return status.spHeat;
     } else if (status.operationMode === 'cool' && status.spCool !== undefined && status.spCool !== null) {
       return status.spCool;
-    } else if (status.operationMode === 'auto' && status.spAuto !== null && status.spAuto !== undefined) {
+    } else if (this.isAutoMode(status.operationMode) && status.spAuto !== null && status.spAuto !== undefined) {
       return status.spAuto;
     }
     // Default to heat setpoint if available, otherwise return a default value
@@ -427,7 +432,7 @@ export class KumoThermostatAccessory {
       commands.spHeat = temp;
     } else if (this.currentStatus.operationMode === 'cool') {
       commands.spCool = temp;
-    } else if (this.currentStatus.operationMode === 'auto') {
+    } else if (this.isAutoMode(this.currentStatus.operationMode)) {
       // For auto mode, set both setpoints
       commands.spHeat = temp;
       commands.spCool = temp;
