@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.3.5
+**Current Version:** 1.3.5 (1.3.6 unreleased on main)
 
 ## Architecture Overview
 
@@ -344,6 +344,15 @@ When making changes, verify:
 
 ## Version History
 
+- **1.3.6** (unreleased) - Additional Socket.IO events, profile-based setpoint limits, offline detection (March 2026)
+  - Listen for `profile_update`, `device_status_v2`, `adapter_update`, `acoil_update` streaming events
+  - Account-level Socket.IO subscription + `force_adapter_request` emits to trigger profile/status data
+  - JWT user ID extraction for account-level subscribe (required for adapter_update events)
+  - `DeviceProfile` interface stores per-device capabilities (modes, fan speeds, vane, setpoint limits)
+  - HomeKit TargetTemperature now enforces correct min/max from device profile (e.g., 17-30°C)
+  - Devices report "Not Responding" in HomeKit when `device_status_v2` reports disconnected
+  - Adapter firmware version and WiFi RSSI logged (password stripped from logs)
+  - Code: `kumo-api.ts:34-39, 616-742`, `accessory.ts:66-115, 347-355`, `settings.ts:83-95`
 - **1.3.5** - Token refresh jitter to prevent rate limits (January 2026)
   - Added random 0-60 second jitter to token refresh timing
   - Prevents predictable API calls that trigger 429 rate limit errors
