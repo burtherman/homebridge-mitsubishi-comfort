@@ -1,5 +1,4 @@
 import { Service, PlatformAccessory, CharacteristicValue, HAPStatus } from 'homebridge';
-import { HapStatusError } from 'hap-nodejs';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone } from './settings';
@@ -336,16 +335,18 @@ export class KumoThermostatAccessory {
         return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
       case 'cool':
         return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'auto':
-        // For auto mode, we need to determine if it's currently heating or cooling
-        // based on target vs current temperature
+      case 'autoHeat':
+        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
+      case 'autoCool':
+        return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
+      case 'auto': {
+        // Plain auto mode — infer from temperature comparison, default to HEAT when at target
         const targetTemp = this.getTargetTempFromStatus(status);
-        if (status.roomTemp < targetTemp) {
-          return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-        } else if (status.roomTemp > targetTemp) {
+        if (status.roomTemp > targetTemp) {
           return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
         }
-        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
+        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
+      }
       case 'off':
       default:
         return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
@@ -359,16 +360,14 @@ export class KumoThermostatAccessory {
     }
 
     // Map operation mode to HomeKit state
-    switch (status.operationMode) {
-      case 'heat':
-        return this.platform.Characteristic.TargetHeatingCoolingState.HEAT;
-      case 'cool':
-        return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
-      case 'auto':
-        return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
-      default:
-        return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
+    if (status.operationMode === 'heat') {
+      return this.platform.Characteristic.TargetHeatingCoolingState.HEAT;
+    } else if (status.operationMode === 'cool') {
+      return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
+    } else if (this.isAutoMode(status.operationMode)) {
+      return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
     }
+    return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
   }
 
   private getTargetTempFromStatus(status: DeviceStatus): number {
@@ -377,7 +376,7 @@ export class KumoThermostatAccessory {
       return status.spHeat;
     } else if (status.operationMode === 'cool' && status.spCool !== undefined && status.spCool !== null) {
       return status.spCool;
-    } else if (status.operationMode === 'auto' && status.spAuto !== null && status.spAuto !== undefined) {
+    } else if (this.isAutoMode(status.operationMode) && status.spAuto !== null && status.spAuto !== undefined) {
       return status.spAuto;
     }
     // Default to heat setpoint if available, otherwise return a default value
@@ -388,9 +387,15 @@ export class KumoThermostatAccessory {
     return 20;
   }
 
+  private isAutoMode(operationMode: string): boolean {
+    return operationMode.startsWith('auto');
+  }
+
   private checkDeviceOnline(): void {
     if (!this.isDeviceOnline) {
-      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      const error = new Error('Device is offline');
+      (error as any).hapStatus = HAPStatus.SERVICE_COMMUNICATION_FAILURE;
+      throw error;
     }
   }
 
@@ -535,7 +540,7 @@ export class KumoThermostatAccessory {
       commands.spHeat = temp;
     } else if (this.currentStatus.operationMode === 'cool') {
       commands.spCool = temp;
-    } else if (this.currentStatus.operationMode === 'auto') {
+    } else if (this.isAutoMode(this.currentStatus.operationMode)) {
       // For auto mode, set both setpoints
       commands.spHeat = temp;
       commands.spCool = temp;
