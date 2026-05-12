@@ -17,6 +17,7 @@ export class KumoThermostatAccessory {
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
   private filterMaintenanceService: Service | null = null;
+  private fanOnlyService: Service | null = null;
   private modelNumberSet: boolean = false;
 
   constructor(
@@ -63,6 +64,8 @@ export class KumoThermostatAccessory {
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
 
+    this.setupFanOnlySwitch();
+
     // Register for streaming updates
     this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
     this.platform.log.debug(`Registered streaming callback for ${this.deviceSerial}`);
@@ -102,6 +105,76 @@ export class KumoThermostatAccessory {
     const maxTempF = (maxTemp * 9 / 5) + 32;
     this.platform.log.info(
       `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
+    );
+  }
+
+  private setupFanOnlySwitch(): void {
+    const displayName = this.accessory.context.device.displayName;
+    const switchName = `${displayName} Fan`;
+
+    this.fanOnlyService =
+      this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only') ||
+      this.accessory.addService(this.platform.Service.Switch, switchName, 'fan-only');
+
+    this.fanOnlyService.setCharacteristic(this.platform.Characteristic.Name, switchName);
+    this.fanOnlyService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
+
+    this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
+      .onGet(this.getFanOnlyOn.bind(this))
+      .onSet(this.setFanOnlyOn.bind(this));
+  }
+
+  private isFanOnlyActive(status: DeviceStatus | null): boolean {
+    if (!status) {
+      return false;
+    }
+    return status.power === 1 && status.operationMode === 'vent';
+  }
+
+  async getFanOnlyOn(): Promise<CharacteristicValue> {
+    return this.isFanOnlyActive(this.currentStatus);
+  }
+
+  async setFanOnlyOn(value: CharacteristicValue): Promise<void> {
+    const on = value as boolean;
+    const operationMode: 'vent' | 'off' = on ? 'vent' : 'off';
+
+    this.platform.log.info(
+      `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
+    );
+
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode });
+
+    if (!success) {
+      this.platform.log.error(
+        `[FAN ONLY] ${this.accessory.displayName}: Failed to set fan-only ${on ? 'ON' : 'OFF'}`,
+      );
+      // Revert the switch to the actual device state
+      setTimeout(() => {
+        this.fanOnlyService?.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isFanOnlyActive(this.currentStatus),
+        );
+      }, 100);
+      return;
+    }
+
+    this.platform.log.info(`[FAN ONLY] ${this.accessory.displayName}: Command accepted by API`);
+
+    // Optimistic local-state update so the thermostat tile reflects the change immediately
+    if (this.currentStatus) {
+      this.currentStatus.operationMode = operationMode;
+      this.currentStatus.power = on ? 1 : 0;
+    }
+
+    // Both vent and off map to HomeKit OFF on the thermostat service
+    this.service.updateCharacteristic(
+      this.platform.Characteristic.CurrentHeatingCoolingState,
+      this.platform.Characteristic.CurrentHeatingCoolingState.OFF,
+    );
+    this.service.updateCharacteristic(
+      this.platform.Characteristic.TargetHeatingCoolingState,
+      this.platform.Characteristic.TargetHeatingCoolingState.OFF,
     );
   }
 
@@ -304,6 +377,14 @@ export class KumoThermostatAccessory {
           status.humidity,
         );
       }
+
+      // Keep the fan-only switch in sync with the underlying device mode
+      if (this.fanOnlyService) {
+        this.fanOnlyService.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isFanOnlyActive(status),
+        );
+      }
     } catch (error) {
       this.platform.log.error('Error updating device status:', error);
     }
@@ -443,6 +524,11 @@ export class KumoThermostatAccessory {
       if (this.currentStatus) {
         this.currentStatus.operationMode = operationMode;
         this.currentStatus.power = operationMode === 'off' ? 0 : 1;
+      }
+
+      // Picking any thermostat mode leaves fan-only inactive
+      if (this.fanOnlyService) {
+        this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
       }
 
       // Note: Platform will update on next poll cycle (no per-device polling timer)
