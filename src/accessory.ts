@@ -258,7 +258,7 @@ export class KumoThermostatAccessory {
         spHeat: data.spHeat!,
         spCool: data.spCool!,
         spAuto: data.spAuto || null,
-        humidity: data.humidity || null,
+        humidity: data.humidity ?? null,
         power: data.power!,
         operationMode: data.operationMode!,
         previousOperationMode: data.operationMode!,
@@ -351,16 +351,11 @@ export class KumoThermostatAccessory {
         this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
           .onGet(this.getCurrentRelativeHumidity.bind(this));
         this.platform.log.debug(`Added humidity characteristic for device ${this.deviceSerial}`);
-      } else if (!hasHumidity && this.hasHumiditySensor) {
-        // Device no longer has humidity sensor - remove the characteristic
-        this.hasHumiditySensor = false;
-        if (this.service.testCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)) {
-          this.service.removeCharacteristic(
-            this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity),
-          );
-          this.platform.log.debug(`Removed humidity characteristic for device ${this.deviceSerial}`);
-        }
       }
+      // Note: Once humidity is detected, we never remove the characteristic.
+      // Streaming updates may intermittently omit humidity data, but that doesn't
+      // mean the hardware sensor is gone. Toggling the characteristic destabilizes
+      // HomeKit and causes "No Response" errors.
 
       // Convert adapter data to DeviceStatus format
       const status: DeviceStatus = {

@@ -183,17 +183,27 @@ JWT tokens expire every 20 minutes. We handle this with:
 
 ### Kumo Cloud v3 API Endpoints
 
-**Base URL:** `https://app-api.kumocloud.com/v3`
+**Base URL:** `https://app-prod.kumocloud.com/v3`
+
+**Required Headers:**
+- `Authorization: Bearer <access-token>` (all authenticated requests)
+- `X-App-Version: 3.2.4` (all requests; constant in `settings.ts`)
 
 **Authentication:**
-- `POST /login` - Returns access and refresh tokens
+- `POST /login` - Returns access and refresh tokens (plus user profile: id, email, etc.)
 - `POST /refresh` - Refreshes access token
 
 **Data Retrieval:**
+- `GET /accounts/me` - Account info (similar to login response)
 - `GET /sites` - List all sites (homes)
-- `GET /sites/{siteId}/zones` - Get all zones for a site
+- `GET /sites/{siteId}/zones` - Get all zones for a site (includes nested `group` and `adapter` objects)
   - Returns full device status for each zone
   - This is the primary polling endpoint
+- `GET /sites/{siteId}/groups` - System changeover groups (minRuntime, maxStandby)
+- `GET /devices/{serial}` - Full device info (includes `model` object with brand, gallery image)
+- `GET /devices/{serial}/profile` - Device capabilities (modes, fan speeds, setpoint limits)
+- `GET /devices/{serial}/status` - Connection status, `cryptoSerial`, `firmwareVersion`, `autoModeDisable`
+- `GET /devices/{serial}/kumo-properties` - Reporting, `outdoorAirTemperature`, `heatModeDisable`
 
 **Commands:**
 - `POST /devices/send-command` - Send command to device
@@ -233,7 +243,7 @@ JWT tokens expire every 20 minutes. We handle this with:
   spCool: number
   spAuto: number | null
   power: 0 | 1
-  operationMode: 'off' | 'heat' | 'cool' | 'auto' | 'vent' | 'dry'
+  operationMode: 'off' | 'heat' | 'cool' | 'auto' | 'autoHeat' | 'autoCool' | 'vent' | 'dry'
   fanSpeed: string
   airDirection: string
   humidity: number | null
@@ -252,6 +262,10 @@ JWT tokens expire every 20 minutes. We handle this with:
   // unusualFigures, statusDisplay, runTest, lastStatusChangeAt, createdAt, updatedAt, timeZone
 }
 ```
+
+**Note on `operationMode`:** When *sending* commands, use `'auto'`. The API *returns* `'autoHeat'` or `'autoCool'` to indicate which sub-mode auto is currently in. The code handles this via `startsWith('auto')` in `accessory.ts`.
+
+**Note on `autoModeDisable`:** The `/devices/{serial}/status` endpoint returns `autoModeDisable: true` for units that don't support auto mode at the hardware level. This explains why `spAuto` is null for some devices.
 
 **Field documentation sourced from:** [dlarrick/hass-kumo](https://github.com/dlarrick/hass-kumo),
 [EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws), and
