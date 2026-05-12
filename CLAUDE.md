@@ -310,6 +310,19 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 | CurrentRelativeHumidity | humidity | Optional sensor |
 | FilterChangeIndication | displayConfig.filter | From streaming only |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
+| Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` service; ON sends `vent`, OFF sends `off` (powers the unit down) |
+
+### Fan-only switch
+
+HomeKit's `Thermostat` service has no fan-only target state, so we expose a second `Switch` service per accessory (subtype `fan-only`).
+
+- **Capability-gated:** the switch is only added once the device profile reports `hasModeVent === true`. If a cached accessory carries a switch but the profile reports no vent support, it's removed.
+- **Switch ON** → `sendCommand({ operationMode: 'vent', power: 1 })`
+- **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
+- The `power` field is sent explicitly on the fan path to match the verified v3 cloud reference ([EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws)); the existing HEAT/COOL/AUTO path still omits `power` since the API derives it from a non-off `operationMode`.
+- The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'vent'`.
+- Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off; engaging the switch optimistically sets the thermostat to OFF (since HomeKit's thermostat service can't represent fan-only).
+- Code: `accessory.ts:setupFanOnlySwitch / removeFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
 
 ## Development Notes
 
@@ -352,7 +365,7 @@ Logs location: `/var/lib/homebridge/homebridge.log`
 1. ~~**Conditional polling:** Only poll when streaming disconnected~~ ✅ **Implemented in v1.3.0**
 2. **Better error handling:** More graceful degradation when API unavailable
 3. **Humidity sensor:** Automatically add humidity sensor accessory when available
-4. **Fan mode:** Support fan-only mode (currently mapped to COOL)
+4. ~~**Fan mode:** Support fan-only mode~~ ✅ Exposed as a separate `Switch` service per accessory
 5. **Config UI:** Add streaming status indicator in Homebridge UI
 
 ## Important Files Reference
