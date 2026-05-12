@@ -235,6 +235,10 @@ export class KumoAPI {
 
     try {
       this.log.debug('Refreshing access token');
+      if (this.debugMode) {
+        this.log.debug(`Refresh token (masked): ${this.maskToken(this.refreshToken)}`);
+        this.log.debug(`Token expires at: ${new Date(this.tokenExpiresAt).toISOString()}`);
+      }
 
       const response = await fetch(`${API_BASE_URL}/refresh`, {
         method: 'POST',
@@ -286,6 +290,10 @@ export class KumoAPI {
       } else {
         this.log.debug('Access token refreshed successfully');
       }
+      if (this.debugMode) {
+        this.log.debug(`New access token (masked): ${this.maskToken(this.accessToken)}`);
+        this.log.debug(`New token expires at: ${new Date(this.tokenExpiresAt).toISOString()}`);
+      }
 
       // Reset retry count on success
       this.refreshRetryCount = 0;
@@ -302,10 +310,14 @@ export class KumoAPI {
     } catch (error) {
       if (error instanceof Error) {
         this.log.error('Token refresh error:', error.message);
+        if (this.debugMode) {
+          this.log.debug('Token refresh error stack:', error.stack);
+        }
       } else {
         this.log.error('Token refresh error: Unknown error occurred');
       }
       this.refreshRetryCount = 0;
+      this.log.warn('Falling back to full login after refresh error');
       return await this.login();
     }
   }
