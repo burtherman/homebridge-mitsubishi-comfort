@@ -64,7 +64,19 @@ export class KumoThermostatAccessory {
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
 
-    this.setupFanOnlySwitch();
+    // If this accessory was cached with a fan-only switch from a previous run,
+    // wire up its handlers immediately. applyDeviceProfile() will remove it if
+    // the device profile later reports hasModeVent === false.
+    const cachedFanSwitch = this.accessory.getServiceById(
+      this.platform.Service.Switch,
+      'fan-only',
+    );
+    if (cachedFanSwitch) {
+      this.fanOnlyService = cachedFanSwitch;
+      this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
+        .onGet(this.getFanOnlyOn.bind(this))
+        .onSet(this.setFanOnlyOn.bind(this));
+    }
 
     // Register for streaming updates
     this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
@@ -106,9 +118,20 @@ export class KumoThermostatAccessory {
     this.platform.log.info(
       `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
     );
+
+    // Add / remove the fan-only switch based on device capability
+    if (profile.hasModeVent) {
+      this.setupFanOnlySwitch();
+    } else {
+      this.removeFanOnlySwitch();
+    }
   }
 
   private setupFanOnlySwitch(): void {
+    if (this.fanOnlyService) {
+      return;
+    }
+
     const displayName = this.accessory.context.device.displayName;
     const switchName = `${displayName} Fan`;
 
@@ -122,6 +145,25 @@ export class KumoThermostatAccessory {
     this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
       .onGet(this.getFanOnlyOn.bind(this))
       .onSet(this.setFanOnlyOn.bind(this));
+
+    // Reflect current state immediately if we already have a status
+    this.fanOnlyService.updateCharacteristic(
+      this.platform.Characteristic.On,
+      this.isFanOnlyActive(this.currentStatus),
+    );
+
+    this.platform.log.debug(`Added Fan-Only switch for ${this.accessory.displayName}`);
+  }
+
+  private removeFanOnlySwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.platform.log.debug(
+        `Removed Fan-Only switch for ${this.accessory.displayName} (device reports no vent mode support)`,
+      );
+    }
+    this.fanOnlyService = null;
   }
 
   private isFanOnlyActive(status: DeviceStatus | null): boolean {
@@ -138,12 +180,13 @@ export class KumoThermostatAccessory {
   async setFanOnlyOn(value: CharacteristicValue): Promise<void> {
     const on = value as boolean;
     const operationMode: 'vent' | 'off' = on ? 'vent' : 'off';
+    const power: 0 | 1 = on ? 1 : 0;
 
     this.platform.log.info(
       `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode });
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode, power });
 
     if (!success) {
       this.platform.log.error(

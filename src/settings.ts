@@ -105,6 +105,7 @@ export interface Commands {
   spCool?: number;
   operationMode?: 'off' | 'heat' | 'cool' | 'auto' | 'vent' | 'dry';
   fanSpeed?: 'auto' | 'low' | 'medium' | 'high';
+  power?: 0 | 1;
 }
 
 export interface SendCommandRequest {

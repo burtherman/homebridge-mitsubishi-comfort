@@ -316,11 +316,13 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 
 HomeKit's `Thermostat` service has no fan-only target state, so we expose a second `Switch` service per accessory (subtype `fan-only`).
 
-- **Switch ON** → `sendCommand({ operationMode: 'vent' })`
-- **Switch OFF** → `sendCommand({ operationMode: 'off' })` — turns the unit off entirely
+- **Capability-gated:** the switch is only added once the device profile reports `hasModeVent === true`. If a cached accessory carries a switch but the profile reports no vent support, it's removed.
+- **Switch ON** → `sendCommand({ operationMode: 'vent', power: 1 })`
+- **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
+- The `power` field is sent explicitly on the fan path to match the verified v3 cloud reference ([EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws)); the existing HEAT/COOL/AUTO path still omits `power` since the API derives it from a non-off `operationMode`.
 - The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'vent'`.
 - Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off; engaging the switch optimistically sets the thermostat to OFF (since HomeKit's thermostat service can't represent fan-only).
-- Code: `accessory.ts:setupFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
+- Code: `accessory.ts:setupFanOnlySwitch / removeFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
 
 ## Development Notes
 
