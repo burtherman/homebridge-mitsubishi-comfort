@@ -469,13 +469,18 @@ When making changes, verify:
 
 Automated npm publishing on GitHub releases:
 - File: `.github/workflows/publish.yml`
-- Trigger: Publishing a GitHub release
-- Authentication: npm Trusted Publishing (OIDC)
-- No secrets required (uses OIDC tokens)
+- Trigger: publishing a GitHub release (or manual `workflow_dispatch` for testing)
+- Authentication: npm Trusted Publishing (OIDC) — no `NPM_TOKEN` secret required
 - Includes provenance for supply chain security
 
+**OIDC requirements (don't break these):**
+- Workflow needs `permissions: id-token: write`
+- Runner needs npm CLI >= 11.5.1 (the `Upgrade npm for trusted publishing` step installs `npm@latest`)
+- Do NOT add `registry-url`/`NODE_AUTH_TOKEN` to `setup-node` — they make npm expect a token and break OIDC (this caused E404-on-PUT auth failures through v1.4.1, which were worked around by manual `npm publish`)
+- A Trusted Publisher must be configured for the package on npmjs.com (package → Settings/Access): GitHub org/user `burtherman`, repo `homebridge-mitsubishi-comfort`, workflow `publish.yml`, environment blank
+- `package.json` `repository.url` must match the trusted-publisher repo
+
 **To publish a new version:**
-1. Update version in package.json: `npm version patch/minor/major`
-2. Push with tags: `git push && git push --tags`
-3. Create GitHub Release at target tag
-4. GitHub Action automatically publishes to npm
+1. Bump version: `npm version patch/minor/major --no-git-tag-version`, commit
+2. Push to `main`
+3. Create a GitHub Release at the `vX.Y.Z` tag — the Action publishes to npm automatically
