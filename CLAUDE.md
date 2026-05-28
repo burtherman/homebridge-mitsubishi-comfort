@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.3.6
+**Current Version:** 1.4.1
 
 ## Architecture Overview
 
@@ -403,6 +403,17 @@ When making changes, verify:
 
 ## Version History
 
+- **1.4.1** - Self-healing device discovery (May 2026)
+  - Fixed: a transient login/network failure at startup (e.g. a DNS blip) left the plugin idle until a manual restart — `discoverDevices()` logged the error and returned with no retry, so streaming never started
+  - `discoverDevices()` now retries with exponential backoff (30s → 5min cap) and keeps retrying indefinitely, recovering on its own once connectivity returns
+  - Retry is idempotent: an `accessoryHandlers` guard prevents double-registering devices across attempts
+  - A transient empty zones response no longer unregisters every cached accessory as "stale" — it retries instead
+  - Added `node:test` regression tests (`test/discovery-retry.test.js`, run via `npm test`)
+  - Code: `platform.ts:34-38, 107-112, 136-176`
+- **1.4.0** - Humidity stabilization, fan-only mode, v3 API docs (May 2026)
+  - Fan-only mode exposed as a separate `Switch` service per thermostat (#11)
+  - Stabilized humidity characteristic and documented v3 API endpoints (#13)
+  - Added debug logging to the token refresh flow (#12)
 - **1.3.6** - Streaming events, device profiles, filter maintenance, model number (March 2026)
   - Listen for `profile_update`, `device_status_v2`, `adapter_update`, `acoil_update` streaming events
   - Account-level Socket.IO subscription + `force_adapter_request` emits to trigger profile/status data

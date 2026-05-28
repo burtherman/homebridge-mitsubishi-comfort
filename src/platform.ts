@@ -31,6 +31,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private pendingModeChange: NodeJS.Timeout | null = null;
   private pendingModeHealthy: boolean | null = null;
 
+  // Discovery retry — self-heals from transient startup failures (e.g. DNS/login blips)
+  private discoveryRetryTimer: NodeJS.Timeout | null = null;
+  private discoveryRetryDelayMs: number = 30000; // grows via backoff, reset on success
+  private readonly discoveryRetryBaseMs: number = 30000; // first retry after 30s
+  private readonly discoveryRetryMaxMs: number = 300000; // cap backoff at 5 minutes
+
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
@@ -99,6 +105,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   }
 
   private cleanup() {
+    // Cancel any pending discovery retry
+    if (this.discoveryRetryTimer) {
+      clearTimeout(this.discoveryRetryTimer);
+      this.discoveryRetryTimer = null;
+    }
+
     // Clean up all site pollers
     for (const [siteId, timer] of this.sitePollers) {
       clearInterval(timer);
@@ -121,7 +133,45 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.accessories.push(accessory);
   }
 
-  async discoverDevices() {
+  async discoverDevices(): Promise<void> {
+    const success = await this.attemptDiscovery();
+
+    if (success) {
+      // Discovery succeeded: cancel any pending retry and reset the backoff.
+      if (this.discoveryRetryTimer) {
+        clearTimeout(this.discoveryRetryTimer);
+        this.discoveryRetryTimer = null;
+      }
+      this.discoveryRetryDelayMs = this.discoveryRetryBaseMs;
+      return;
+    }
+
+    this.scheduleDiscoveryRetry();
+  }
+
+  /**
+   * Re-run discovery after a transient failure (e.g. a DNS/login blip at startup).
+   * Without this, a single failed login left the plugin idle until a manual restart.
+   * Backoff grows 30s -> 5min and then retries indefinitely, so the plugin recovers
+   * on its own whenever connectivity returns.
+   */
+  private scheduleDiscoveryRetry(): void {
+    if (this.discoveryRetryTimer) {
+      return; // a retry is already queued
+    }
+
+    const delaySec = Math.round(this.discoveryRetryDelayMs / 1000);
+    this.log.warn(`Device discovery did not complete - retrying in ${delaySec}s`);
+
+    this.discoveryRetryTimer = setTimeout(() => {
+      this.discoveryRetryTimer = null;
+      this.discoverDevices();
+    }, this.discoveryRetryDelayMs);
+
+    this.discoveryRetryDelayMs = Math.min(this.discoveryRetryDelayMs * 2, this.discoveryRetryMaxMs);
+  }
+
+  private async attemptDiscovery(): Promise<boolean> {
     try {
       this.log.info('Starting device discovery');
 
@@ -129,14 +179,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       const loginSuccess = await this.kumoAPI.login();
       if (!loginSuccess) {
         this.log.error('Failed to login to Kumo Cloud API');
-        return;
+        return false;
       }
 
       // Get all sites
       const sites = await this.kumoAPI.getSites();
       if (sites.length === 0) {
         this.log.warn('No sites found');
-        return;
+        return false;
       }
 
       this.log.info(`Found ${sites.length} site(s)`);
@@ -174,6 +224,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           });
 
           this.log.info(`Discovered device: ${displayName} (${deviceSerial})`);
+
+          // Idempotency: a previous (partial) discovery attempt may have already
+          // created a handler for this device. Skip it so retries never double-register.
+          if (this.accessoryHandlers.some(handler => handler.getDeviceSerial() === deviceSerial)) {
+            this.log.debug(`Handler already initialized for ${deviceSerial}, skipping`);
+            continue;
+          }
 
           // Check if accessory already exists
           const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
@@ -216,6 +273,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             this.accessories.push(accessory);
           }
         }
+      }
+
+      // A transient zones-fetch failure returns no zones, leaving this empty.
+      // Treat that as a failure and retry rather than unregistering every cached
+      // accessory as "stale".
+      if (discoveredDevices.length === 0) {
+        this.log.warn('No devices discovered - likely a transient API failure; will retry');
+        return false;
       }
 
       // Remove accessories that were not discovered
@@ -282,8 +347,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       } else {
         this.log.info('Polling disabled - will activate only if streaming fails');
       }
+
+      return true;
     } catch (error) {
       this.log.error('Error during device discovery:', error);
+      return false;
     }
   }
 
