@@ -241,6 +241,12 @@ export class KumoThermostatAccessory {
       this.platform.Characteristic.TargetHeatingCoolingState,
       this.platform.Characteristic.TargetHeatingCoolingState.OFF,
     );
+
+    // Fan-only and dry are mutually exclusive — engaging fan-only means the
+    // unit is no longer dehumidifying, so flip the dry switch off optimistically.
+    if (this.dryService) {
+      this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
+    }
   }
 
   private setupDrySwitch(): void {
@@ -335,6 +341,12 @@ export class KumoThermostatAccessory {
       this.platform.Characteristic.TargetHeatingCoolingState,
       this.platform.Characteristic.TargetHeatingCoolingState.OFF,
     );
+
+    // Fan-only and dry are mutually exclusive — engaging dry means the unit is
+    // no longer fan-only, so flip the fan switch off optimistically.
+    if (this.fanOnlyService) {
+      this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
+    }
   }
 
   private updateFilterMaintenance(filterDirty: boolean): void {
