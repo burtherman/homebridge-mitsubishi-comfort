@@ -14,11 +14,11 @@ jobs:
       contents: read
       id-token: write # Required for npm Trusted Publishing (OIDC)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # NOTE: do NOT set registry-url / NODE_AUTH_TOKEN here. setup-node writes an
       # .npmrc that expects a token and that interferes with OIDC trusted publishing.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
 

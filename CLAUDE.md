@@ -421,6 +421,7 @@ When making changes, verify:
   - Real-world trigger: a HomeKit automation/scene that turns the AC off (e.g. "off when the skylight opens") captures each thermostat's *full* state, so firing it re-pushes the last setpoint alongside `off`. The `off` succeeded; the trailing setpoint on the now-off unit produced the 400s. The "all units, same second, `HomeKit sent`" log signature distinguishes a controller-pushed burst from a user tap
   - Fix: `setTargetTemperature` now short-circuits when `power === 0 || operationMode === 'off'` — it caches the value and echoes it to HomeKit (so the slider holds) without sending a doomed command. Heat/cool/auto paths unchanged
   - `node:test` regression (`test/setpoint-while-off.test.js`): off → no command sent (failed pre-fix with `1 !== 0`), off → value still echoed, heat → setpoint still sent (control)
+  - CI: bumped `actions/checkout` and `actions/setup-node` to `@v5` in `publish.yml` ahead of the 2026-06-16 Node-20 runner deprecation (no functional change to publishing)
   - Code: `accessory.ts:setTargetTemperature`
 - **1.5.1** - Publish runtime-added features to HomeKit (June 2026)
   - Fixed: the fan-only switch (since 1.4.0), the dry switch (1.5.0), the humidity characteristic, and the filter indicator were all added to the accessory *after* it was published to the bridge (from async `profile_update` / first-reading callbacks) but never re-published — so they existed in memory and the HAP cache but never reached the Home app
@@ -513,7 +514,7 @@ Automated npm publishing on GitHub releases:
 - A Trusted Publisher must be configured for the package on npmjs.com (package → Settings/Access): GitHub org/user `burtherman`, repo `homebridge-mitsubishi-comfort`, workflow `publish.yml`, environment blank
 - `package.json` `repository.url` must match the trusted-publisher repo
 
-**Pending maintenance — runner Node deprecation (flagged June 2026):** the publish run warns that `actions/checkout@v4` and `actions/setup-node@v4` run on Node 20, which GitHub force-migrates to Node 24 on **2026-06-16** (Node 20 removed from runners 2026-09-16). The `@v4` actions are expected to keep working, but bump both to `@v5` in `publish.yml` to remove the risk to the publish pipeline.
+**Runner Node deprecation — resolved in 1.5.2 (2026-06-09):** `actions/checkout` and `actions/setup-node` are pinned to `@v5` (Node 24 runtime), ahead of GitHub's 2026-06-16 force-migration of `@v4` (Node 20) and the 2026-09-16 removal of Node 20 from runners. No further action needed; keep both at `@v5` (or newer) going forward.
 
 **To publish a new version:**
 1. Bump version: `npm version patch/minor/major --no-git-tag-version`, commit
