@@ -507,6 +507,8 @@ Automated npm publishing on GitHub releases:
 - A Trusted Publisher must be configured for the package on npmjs.com (package → Settings/Access): GitHub org/user `burtherman`, repo `homebridge-mitsubishi-comfort`, workflow `publish.yml`, environment blank
 - `package.json` `repository.url` must match the trusted-publisher repo
 
+**Pending maintenance — runner Node deprecation (flagged June 2026):** the publish run warns that `actions/checkout@v4` and `actions/setup-node@v4` run on Node 20, which GitHub force-migrates to Node 24 on **2026-06-16** (Node 20 removed from runners 2026-09-16). The `@v4` actions are expected to keep working, but bump both to `@v5` in `publish.yml` to remove the risk to the publish pipeline.
+
 **To publish a new version:**
 1. Bump version: `npm version patch/minor/major --no-git-tag-version`, commit
 2. Push to `main`
