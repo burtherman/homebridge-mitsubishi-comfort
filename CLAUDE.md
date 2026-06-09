@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.5.0
+**Current Version:** 1.5.1
 
 ## Architecture Overview
 
@@ -416,6 +416,13 @@ When making changes, verify:
 
 ## Version History
 
+- **1.5.1** - Publish runtime-added features to HomeKit (June 2026)
+  - Fixed: the fan-only switch (since 1.4.0), the dry switch (1.5.0), the humidity characteristic, and the filter indicator were all added to the accessory *after* it was published to the bridge (from async `profile_update` / first-reading callbacks) but never re-published — so they existed in memory and the HAP cache but never reached the Home app
+  - Root cause: no `api.updatePlatformAccessories([accessory])` call after a runtime structural change. Centralized in `accessory.ts:publishStructureChange()`, called at every add/remove site (switches, humidity, filter)
+  - `node:test` coverage extended (`test/switch-publish.test.js`) — asserts a re-publish happens on switch add/remove and on the first humidity reading; proven to fail against the pre-fix build
+  - **Operational caveat:** publishing the service is necessary but not always sufficient. HomeKit controllers cache an accessory's *service list* and only re-read it when the bridge's configuration number (`c#`) increases. iOS will not surface services added to an already-paired accessory until its cache is cleared — a full **device reboot** (clears the `homed` cache) or removing/re-adding the child bridge. Force-quitting the Home app or restarting a Home hub is not enough.
+  - Child bridge accessories persist to `accessories/cachedAccessories.<username-without-colons>` (e.g. `cachedAccessories.0EA3CB05C3A2`), NOT the main `cachedAccessories`
+  - Code: `accessory.ts:publishStructureChange and its 6 call sites`
 - **1.5.0** - Dry (dehumidify) mode as a Switch (June 2026)
   - Exposes dry mode as a separate `Switch` service per thermostat (subtype `dry`), mirroring the fan-only switch (#14)
   - Capability-gated on `profile.hasModeDry`; a cached switch is removed if the device reports no dry support
