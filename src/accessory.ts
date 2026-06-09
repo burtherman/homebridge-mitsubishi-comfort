@@ -149,6 +149,17 @@ export class KumoThermostatAccessory {
     }
   }
 
+  /**
+   * Re-publish this accessory to the bridge. REQUIRED after adding or removing a
+   * service or characteristic at runtime: the accessory was already published to
+   * HomeKit during discovery, so structural changes that happen later (a
+   * capability switch, the humidity characteristic, the filter service) never
+   * reach the Home app — or get persisted to the cache — without this call.
+   */
+  private publishStructureChange(): void {
+    this.platform.api.updatePlatformAccessories([this.accessory]);
+  }
+
   private setupFanOnlySwitch(): void {
     if (this.fanOnlyService) {
       return;
@@ -179,7 +190,7 @@ export class KumoThermostatAccessory {
     // has already been published to the bridge. A service added now is invisible
     // to HomeKit (and not persisted) unless we re-publish the accessory.
     if (!existing) {
-      this.platform.api.updatePlatformAccessories([this.accessory]);
+      this.publishStructureChange();
     }
 
     this.platform.log.debug(`Added Fan-Only switch for ${this.accessory.displayName}`);
@@ -189,7 +200,7 @@ export class KumoThermostatAccessory {
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
     if (existing) {
       this.accessory.removeService(existing);
-      this.platform.api.updatePlatformAccessories([this.accessory]);
+      this.publishStructureChange();
       this.platform.log.debug(
         `Removed Fan-Only switch for ${this.accessory.displayName} (device reports no vent mode support)`,
       );
@@ -288,7 +299,7 @@ export class KumoThermostatAccessory {
     // has already been published to the bridge. A service added now is invisible
     // to HomeKit (and not persisted) unless we re-publish the accessory.
     if (!existing) {
-      this.platform.api.updatePlatformAccessories([this.accessory]);
+      this.publishStructureChange();
     }
 
     this.platform.log.debug(`Added Dry switch for ${this.accessory.displayName}`);
@@ -298,7 +309,7 @@ export class KumoThermostatAccessory {
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'dry');
     if (existing) {
       this.accessory.removeService(existing);
-      this.platform.api.updatePlatformAccessories([this.accessory]);
+      this.publishStructureChange();
       this.platform.log.debug(
         `Removed Dry switch for ${this.accessory.displayName} (device reports no dry mode support)`,
       );
@@ -372,6 +383,7 @@ export class KumoThermostatAccessory {
       this.filterMaintenanceService =
         this.accessory.getService(this.platform.Service.FilterMaintenance) ||
         this.accessory.addService(this.platform.Service.FilterMaintenance);
+      this.publishStructureChange();
       this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
     }
 
@@ -496,6 +508,7 @@ export class KumoThermostatAccessory {
         this.hasHumiditySensor = true;
         this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
           .onGet(this.getCurrentRelativeHumidity.bind(this));
+        this.publishStructureChange();
         this.platform.log.debug(`Added humidity characteristic for device ${this.deviceSerial}`);
       }
       // Note: Once humidity is detected, we never remove the characteristic.

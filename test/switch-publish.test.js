@@ -110,10 +110,19 @@ function makeHarness() {
     onDeviceProfileUpdate(cb) { profileCb = cb; },
   };
   const accessory = makeAccessory();
-  // eslint-disable-next-line no-new
-  new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  return { accessory, updates, applyProfile: (p) => profileCb(SERIAL, p) };
+  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  return { handler, accessory, updates, applyProfile: (p) => profileCb(SERIAL, p) };
 }
+
+const zone = (over = {}) => ({
+  id: 'zone-1',
+  adapter: {
+    deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
+    fanSpeed: null, airDirection: null,
+    roomTemp: 22, spCool: 24, spHeat: 20, spAuto: null, humidity: null,
+    ...over,
+  },
+});
 
 const profile = (over = {}) => ({
   minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
@@ -151,4 +160,22 @@ test('dropping dry support removes the switch and publishes the removal', () => 
   applyProfile(profile({ hasModeDry: false }));
   assert.strictEqual(accessory.getServiceById(Service.Switch, 'dry'), null, 'dry switch removed');
   assert.ok(updates.length > before, 'removal re-published to HomeKit');
+});
+
+// Same bug class as the switches: the humidity characteristic is added to the
+// thermostat service the first time a humidity reading arrives — long after the
+// accessory was published — so it must re-publish too.
+test('first humidity reading publishes the humidity characteristic', () => {
+  const { handler, updates } = makeHarness();
+  const before = updates.length;
+  handler.updateFromZone(zone({ humidity: 51 }));
+  assert.ok(updates.length > before, 'adding humidity characteristic re-published the accessory');
+});
+
+test('humidity characteristic is published only once, not on every reading', () => {
+  const { handler, updates } = makeHarness();
+  handler.updateFromZone(zone({ humidity: 51 }));
+  const after = updates.length;
+  handler.updateFromZone(zone({ humidity: 52 }));
+  assert.strictEqual(updates.length, after, 'no redundant publish once humidity is registered');
 });
