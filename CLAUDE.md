@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.4.1
+**Current Version:** 1.5.0
 
 ## Architecture Overview
 
@@ -325,6 +325,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 | FilterChangeIndication | displayConfig.filter | From streaming only |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
 | Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` service; ON sends `vent`, OFF sends `off` (powers the unit down) |
+| Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` service; ON sends `dry`, OFF sends `off`. Capability-gated on `hasModeDry`. Mutually exclusive with the Fan switch |
 
 ### Fan-only switch
 
@@ -337,6 +338,18 @@ HomeKit's `Thermostat` service has no fan-only target state, so we expose a seco
 - The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'vent'`.
 - Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off; engaging the switch optimistically sets the thermostat to OFF (since HomeKit's thermostat service can't represent fan-only).
 - Code: `accessory.ts:setupFanOnlySwitch / removeFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
+
+### Dry switch
+
+HomeKit's `Thermostat` service has no dehumidify target state either, so dry is surfaced the same way as fan-only: a separate `Switch` service per accessory (subtype `dry`).
+
+- **Capability-gated:** added only once the device profile reports `hasModeDry === true` (a real top-level field in the v3 profile payload — see `API-EXPLORATION-FINDINGS.md`). A cached switch on a device that reports no dry support is removed.
+- **Switch ON** → `sendCommand({ operationMode: 'dry', power: 1 })`
+- **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
+- The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'dry'`.
+- **Mutually exclusive with fan-only:** engaging dry optimistically flips the Fan switch off, and engaging fan-only flips the Dry switch off; changing the thermostat to HEAT / COOL / AUTO / OFF flips both off. Streaming/polling reconciles as the authoritative backstop. The optimistic cross-flip is unconditional because a successful command always leaves the unit in this switch's mode or `off` — never the sibling's mode.
+- **Setpoint limitation:** some units report `usesSetPointInDryMode === true`, meaning they accept a target while dehumidifying. An on/off switch can't express that, so dry runs at the unit's default setpoint (same inherent HomeKit constraint as fan having no speed). While dry is active the thermostat tile shows OFF.
+- Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 
 ## Development Notes
 
@@ -403,6 +416,13 @@ When making changes, verify:
 
 ## Version History
 
+- **1.5.0** - Dry (dehumidify) mode as a Switch (June 2026)
+  - Exposes dry mode as a separate `Switch` service per thermostat (subtype `dry`), mirroring the fan-only switch (#14)
+  - Capability-gated on `profile.hasModeDry`; a cached switch is removed if the device reports no dry support
+  - Switch ON → `sendCommand({ operationMode: 'dry', power: 1 })`; OFF → `{ operationMode: 'off', power: 0 }`
+  - Fan-only and dry are mutually exclusive: engaging one optimistically flips the other off, with streaming/polling as the backstop
+  - HomeKit's Thermostat service has no dehumidify state, so (like fan-only) the thermostat shows OFF while dry is active; the unit's dry setpoint (`usesSetPointInDryMode`) can't be exposed through an on/off switch
+  - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 - **1.4.1** - Self-healing device discovery (May 2026)
   - Fixed: a transient login/network failure at startup (e.g. a DNS blip) left the plugin idle until a manual restart — `discoverDevices()` logged the error and returned with no retry, so streaming never started
   - `discoverDevices()` now retries with exponential backoff (30s → 5min cap) and keeps retrying indefinitely, recovering on its own once connectivity returns
