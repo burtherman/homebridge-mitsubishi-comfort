@@ -18,6 +18,7 @@ export class KumoThermostatAccessory {
   private deviceProfile: DeviceProfile | null = null;
   private filterMaintenanceService: Service | null = null;
   private fanOnlyService: Service | null = null;
+  private dryService: Service | null = null;
   private modelNumberSet: boolean = false;
 
   constructor(
@@ -78,6 +79,18 @@ export class KumoThermostatAccessory {
         .onSet(this.setFanOnlyOn.bind(this));
     }
 
+    // Same for a cached dry switch (see setupDrySwitch / hasModeDry).
+    const cachedDrySwitch = this.accessory.getServiceById(
+      this.platform.Service.Switch,
+      'dry',
+    );
+    if (cachedDrySwitch) {
+      this.dryService = cachedDrySwitch;
+      this.dryService.getCharacteristic(this.platform.Characteristic.On)
+        .onGet(this.getDryOn.bind(this))
+        .onSet(this.setDryOn.bind(this));
+    }
+
     // Register for streaming updates
     this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
     this.platform.log.debug(`Registered streaming callback for ${this.deviceSerial}`);
@@ -124,6 +137,15 @@ export class KumoThermostatAccessory {
       this.setupFanOnlySwitch();
     } else {
       this.removeFanOnlySwitch();
+    }
+
+    // Add / remove the dry switch based on device capability. HomeKit's
+    // Thermostat can't represent dehumidify, so — exactly like fan-only —
+    // dry is surfaced as a separate Switch.
+    if (profile.hasModeDry) {
+      this.setupDrySwitch();
+    } else {
+      this.removeDrySwitch();
     }
   }
 
@@ -211,6 +233,100 @@ export class KumoThermostatAccessory {
     }
 
     // Both vent and off map to HomeKit OFF on the thermostat service
+    this.service.updateCharacteristic(
+      this.platform.Characteristic.CurrentHeatingCoolingState,
+      this.platform.Characteristic.CurrentHeatingCoolingState.OFF,
+    );
+    this.service.updateCharacteristic(
+      this.platform.Characteristic.TargetHeatingCoolingState,
+      this.platform.Characteristic.TargetHeatingCoolingState.OFF,
+    );
+  }
+
+  private setupDrySwitch(): void {
+    if (this.dryService) {
+      return;
+    }
+
+    const displayName = this.accessory.context.device.displayName;
+    const switchName = `${displayName} Dry`;
+
+    this.dryService =
+      this.accessory.getServiceById(this.platform.Service.Switch, 'dry') ||
+      this.accessory.addService(this.platform.Service.Switch, switchName, 'dry');
+
+    this.dryService.setCharacteristic(this.platform.Characteristic.Name, switchName);
+    this.dryService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
+
+    this.dryService.getCharacteristic(this.platform.Characteristic.On)
+      .onGet(this.getDryOn.bind(this))
+      .onSet(this.setDryOn.bind(this));
+
+    // Reflect current state immediately if we already have a status
+    this.dryService.updateCharacteristic(
+      this.platform.Characteristic.On,
+      this.isDryActive(this.currentStatus),
+    );
+
+    this.platform.log.debug(`Added Dry switch for ${this.accessory.displayName}`);
+  }
+
+  private removeDrySwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'dry');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.platform.log.debug(
+        `Removed Dry switch for ${this.accessory.displayName} (device reports no dry mode support)`,
+      );
+    }
+    this.dryService = null;
+  }
+
+  private isDryActive(status: DeviceStatus | null): boolean {
+    if (!status) {
+      return false;
+    }
+    return status.power === 1 && status.operationMode === 'dry';
+  }
+
+  async getDryOn(): Promise<CharacteristicValue> {
+    return this.isDryActive(this.currentStatus);
+  }
+
+  async setDryOn(value: CharacteristicValue): Promise<void> {
+    const on = value as boolean;
+    const operationMode: 'dry' | 'off' = on ? 'dry' : 'off';
+    const power: 0 | 1 = on ? 1 : 0;
+
+    this.platform.log.info(
+      `[DRY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
+    );
+
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode, power });
+
+    if (!success) {
+      this.platform.log.error(
+        `[DRY] ${this.accessory.displayName}: Failed to set dry ${on ? 'ON' : 'OFF'}`,
+      );
+      // Revert the switch to the actual device state
+      setTimeout(() => {
+        this.dryService?.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isDryActive(this.currentStatus),
+        );
+      }, 100);
+      return;
+    }
+
+    this.platform.log.info(`[DRY] ${this.accessory.displayName}: Command accepted by API`);
+
+    // Optimistic local-state update so the thermostat tile reflects the change immediately
+    if (this.currentStatus) {
+      this.currentStatus.operationMode = operationMode;
+      this.currentStatus.power = on ? 1 : 0;
+    }
+
+    // Both dry and off map to HomeKit OFF on the thermostat service
     this.service.updateCharacteristic(
       this.platform.Characteristic.CurrentHeatingCoolingState,
       this.platform.Characteristic.CurrentHeatingCoolingState.OFF,
@@ -423,6 +539,14 @@ export class KumoThermostatAccessory {
           this.isFanOnlyActive(status),
         );
       }
+
+      // Keep the dry switch in sync with the underlying device mode
+      if (this.dryService) {
+        this.dryService.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isDryActive(status),
+        );
+      }
     } catch (error) {
       this.platform.log.error('Error updating device status:', error);
     }
@@ -564,9 +688,12 @@ export class KumoThermostatAccessory {
         this.currentStatus.power = operationMode === 'off' ? 0 : 1;
       }
 
-      // Picking any thermostat mode leaves fan-only inactive
+      // Picking any thermostat mode leaves fan-only and dry inactive
       if (this.fanOnlyService) {
         this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
+      }
+      if (this.dryService) {
+        this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
       }
 
       // Note: Platform will update on next poll cycle (no per-device polling timer)
