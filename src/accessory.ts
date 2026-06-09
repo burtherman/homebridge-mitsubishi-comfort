@@ -797,6 +797,26 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    // HomeKit can push a target temperature even while the unit is off — its
+    // Thermostat service has no off-aware setpoint, and automations/scenes that
+    // capture a thermostat's full state re-send the last setpoint alongside
+    // `off`. The Kumo v3 API rejects a bare setpoint on a powered-off unit
+    // (`modeRequiredWhenDeviceOff`, HTTP 400), so don't send a doomed command:
+    // the unit is off, there's nothing to set. Cache the value and echo it back
+    // to HomeKit so the slider holds; the setpoint is sent when the unit is
+    // turned on (the mode handlers carry it).
+    if (this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off') {
+      this.platform.log.debug(
+        `[TEMP CHANGE] ${this.accessory.displayName}: unit is off — caching ${temp}°C without sending (API rejects a setpoint while off)`,
+      );
+      this.currentStatus.spHeat = temp;
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.TargetTemperature,
+        temp,
+      );
+      return;
+    }
+
     // Set the appropriate setpoint based on current mode
     const commands: { spHeat?: number; spCool?: number } = {};
 
@@ -809,7 +829,7 @@ export class KumoThermostatAccessory {
       commands.spHeat = temp;
       commands.spCool = temp;
     } else {
-      // If off, set heat setpoint by default
+      // Vent/dry or any other non-off mode: default to the heat setpoint.
       commands.spHeat = temp;
     }
 

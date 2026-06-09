@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.5.1
+**Current Version:** 1.5.2
 
 ## Architecture Overview
 
@@ -416,6 +416,12 @@ When making changes, verify:
 
 ## Version History
 
+- **1.5.2** - Don't send a setpoint to a powered-off unit (June 2026)
+  - Fixed: setting a TargetTemperature while a unit is off sent a bare `{ spHeat }` with no `operationMode`, which the Kumo v3 API rejects with `modeRequiredWhenDeviceOff` (HTTP 400). Every such attempt logged a cluster of red errors (`Request failed with status: 400` → `Send command failed` → `Failed to set target temperature`)
+  - Real-world trigger: a HomeKit automation/scene that turns the AC off (e.g. "off when the skylight opens") captures each thermostat's *full* state, so firing it re-pushes the last setpoint alongside `off`. The `off` succeeded; the trailing setpoint on the now-off unit produced the 400s. The "all units, same second, `HomeKit sent`" log signature distinguishes a controller-pushed burst from a user tap
+  - Fix: `setTargetTemperature` now short-circuits when `power === 0 || operationMode === 'off'` — it caches the value and echoes it to HomeKit (so the slider holds) without sending a doomed command. Heat/cool/auto paths unchanged
+  - `node:test` regression (`test/setpoint-while-off.test.js`): off → no command sent (failed pre-fix with `1 !== 0`), off → value still echoed, heat → setpoint still sent (control)
+  - Code: `accessory.ts:setTargetTemperature`
 - **1.5.1** - Publish runtime-added features to HomeKit (June 2026)
   - Fixed: the fan-only switch (since 1.4.0), the dry switch (1.5.0), the humidity characteristic, and the filter indicator were all added to the accessory *after* it was published to the bridge (from async `profile_update` / first-reading callbacks) but never re-published — so they existed in memory and the HAP cache but never reached the Home app
   - Root cause: no `api.updatePlatformAccessories([accessory])` call after a runtime structural change. Centralized in `accessory.ts:publishStructureChange()`, called at every add/remove site (switches, humidity, filter)
