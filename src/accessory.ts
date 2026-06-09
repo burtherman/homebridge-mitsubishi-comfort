@@ -154,11 +154,12 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
     const displayName = this.accessory.context.device.displayName;
     const switchName = `${displayName} Fan`;
 
     this.fanOnlyService =
-      this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only') ||
+      existing ||
       this.accessory.addService(this.platform.Service.Switch, switchName, 'fan-only');
 
     this.fanOnlyService.setCharacteristic(this.platform.Characteristic.Name, switchName);
@@ -174,6 +175,13 @@ export class KumoThermostatAccessory {
       this.isFanOnlyActive(this.currentStatus),
     );
 
+    // The profile arrives via an async streaming event, after the accessory
+    // has already been published to the bridge. A service added now is invisible
+    // to HomeKit (and not persisted) unless we re-publish the accessory.
+    if (!existing) {
+      this.platform.api.updatePlatformAccessories([this.accessory]);
+    }
+
     this.platform.log.debug(`Added Fan-Only switch for ${this.accessory.displayName}`);
   }
 
@@ -181,6 +189,7 @@ export class KumoThermostatAccessory {
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
     if (existing) {
       this.accessory.removeService(existing);
+      this.platform.api.updatePlatformAccessories([this.accessory]);
       this.platform.log.debug(
         `Removed Fan-Only switch for ${this.accessory.displayName} (device reports no vent mode support)`,
       );
@@ -254,11 +263,12 @@ export class KumoThermostatAccessory {
       return;
     }
 
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'dry');
     const displayName = this.accessory.context.device.displayName;
     const switchName = `${displayName} Dry`;
 
     this.dryService =
-      this.accessory.getServiceById(this.platform.Service.Switch, 'dry') ||
+      existing ||
       this.accessory.addService(this.platform.Service.Switch, switchName, 'dry');
 
     this.dryService.setCharacteristic(this.platform.Characteristic.Name, switchName);
@@ -274,6 +284,13 @@ export class KumoThermostatAccessory {
       this.isDryActive(this.currentStatus),
     );
 
+    // The profile arrives via an async streaming event, after the accessory
+    // has already been published to the bridge. A service added now is invisible
+    // to HomeKit (and not persisted) unless we re-publish the accessory.
+    if (!existing) {
+      this.platform.api.updatePlatformAccessories([this.accessory]);
+    }
+
     this.platform.log.debug(`Added Dry switch for ${this.accessory.displayName}`);
   }
 
@@ -281,6 +298,7 @@ export class KumoThermostatAccessory {
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'dry');
     if (existing) {
       this.accessory.removeService(existing);
+      this.platform.api.updatePlatformAccessories([this.accessory]);
       this.platform.log.debug(
         `Removed Dry switch for ${this.accessory.displayName} (device reports no dry mode support)`,
       );
