@@ -90,6 +90,10 @@ export interface DeviceProfile {
   numberOfFanSpeeds: number;
   hasFanSpeedAuto: boolean;
   hasModeDry: boolean;
+  // Dry mode holds its setpoint in spCool on the Kumo v3 cloud (there is no
+  // spDry field). When true, dry has a settable target; when false the unit
+  // dehumidifies at a fixed setpoint and ignores writes. See accessory.ts.
+  usesSetPointInDryMode: boolean;
   hasModeHeat: boolean;
   hasModeVent: boolean;
   hasVaneDir: boolean;

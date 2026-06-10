@@ -650,6 +650,14 @@ export class KumoThermostatAccessory {
       return status.spCool;
     } else if (this.isAutoMode(status.operationMode) && status.spAuto !== null && status.spAuto !== undefined) {
       return status.spAuto;
+    } else if (
+      status.operationMode === 'dry' &&
+      this.dryUsesSetpoint() &&
+      status.spCool !== undefined &&
+      status.spCool !== null
+    ) {
+      // Dry holds its setpoint in spCool, not spHeat (Kumo v3, verified live).
+      return status.spCool;
     }
     // Default to heat setpoint if available, otherwise return a default value
     if (status.spHeat !== undefined && status.spHeat !== null) {
@@ -661,6 +669,20 @@ export class KumoThermostatAccessory {
 
   private isAutoMode(operationMode: string): boolean {
     return operationMode.startsWith('auto');
+  }
+
+  /**
+   * Whether dry mode exposes a settable temperature target on this unit.
+   *
+   * On the Kumo v3 cloud the dry setpoint lives in `spCool` (there is no spDry
+   * field), and the device profile reports `usesSetPointInDryMode`. We treat dry
+   * as having a setpoint unless the profile is loaded and explicitly says it
+   * doesn't — so the common case still works during the brief window before the
+   * async profile_update arrives. Verified live: writing `spCool` while in dry is
+   * adopted and the unit stays in dry.
+   */
+  private dryUsesSetpoint(): boolean {
+    return this.deviceProfile === null || this.deviceProfile.usesSetPointInDryMode;
   }
 
   async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
@@ -828,8 +850,14 @@ export class KumoThermostatAccessory {
       // For auto mode, set both setpoints
       commands.spHeat = temp;
       commands.spCool = temp;
+    } else if (this.currentStatus.operationMode === 'dry' && this.dryUsesSetpoint()) {
+      // Dry holds its setpoint in spCool, not spHeat (Kumo v3; there is no spDry
+      // field). Verified live: the spCool write is adopted and the unit stays in
+      // dry — sending spCool alone is sufficient, no operationMode needed.
+      commands.spCool = temp;
     } else {
-      // Vent/dry or any other non-off mode: default to the heat setpoint.
+      // Fan-only ('vent'), dry-without-setpoint, or any other non-off mode:
+      // no meaningful target. Default to the heat setpoint (unchanged behavior).
       commands.spHeat = temp;
     }
 

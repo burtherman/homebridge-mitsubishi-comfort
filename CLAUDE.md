@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.5.2
+**Current Version:** 1.5.3
 
 ## Architecture Overview
 
@@ -318,7 +318,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 | HomeKit Characteristic | Kumo API Field | Notes |
 |----------------------|----------------|-------|
 | CurrentTemperature | roomTemp | In Celsius |
-| TargetTemperature | spHeat/spCool | Depends on mode |
+| TargetTemperature | spHeat/spCool | Depends on mode. Dry → `spCool` (Kumo v3 keeps the dry setpoint there; no `spDry` field), gated on `usesSetPointInDryMode` |
 | CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL |
 | TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO |
 | CurrentRelativeHumidity | humidity | Optional sensor |
@@ -348,7 +348,7 @@ HomeKit's `Thermostat` service has no dehumidify target state either, so dry is 
 - **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
 - The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'dry'`.
 - **Mutually exclusive with fan-only:** engaging dry optimistically flips the Fan switch off, and engaging fan-only flips the Dry switch off; changing the thermostat to HEAT / COOL / AUTO / OFF flips both off. Streaming/polling reconciles as the authoritative backstop. The optimistic cross-flip is unconditional because a successful command always leaves the unit in this switch's mode or `off` — never the sibling's mode.
-- **Setpoint limitation:** some units report `usesSetPointInDryMode === true`, meaning they accept a target while dehumidifying. An on/off switch can't express that, so dry runs at the unit's default setpoint (same inherent HomeKit constraint as fan having no speed). While dry is active the thermostat tile shows OFF.
+- **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). The thermostat tile still shows OFF in dry (`TargetHeatingCoolingState === 0`), so the stock Home app surfaces no dry-setpoint UI — but raw-characteristic clients (e.g. the Portal dashboard) can now read and set it. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
 - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 
 ## Development Notes
@@ -416,6 +416,13 @@ When making changes, verify:
 
 ## Version History
 
+- **1.5.3** - Route the Dry-mode setpoint to `spCool` (June 2026)
+  - Fixed: in Dry mode the plugin read and wrote the temperature setpoint to `spHeat`, but the Kumo v3 cloud keeps the dry setpoint in `spCool` (there is no `spDry` field). So dry-mode temperature changes silently did nothing — the cloud accepted the `spHeat` write but the unit ignored it, and out-of-range values 400'd with `invalidSpHeatRange`. Reads surfaced the wrong field (e.g. a unit in dry reporting `spCool=25, spHeat=23` showed 23°C)
+  - Live-confirmed (real account, `app-prod.kumocloud.com/v3`): four dry captures held the setpoint in `spCool`; `GET /devices/{serial}/profile` returns `usesSetPointInDryMode: true`; a `POST /devices/send-command {commands:{spCool:24}}` round-trip was adopted and the unit stayed in dry (no flip to cool, no `operationMode` needed)
+  - Fix: explicit `dry` branch in both `setTargetTemperature` (write → `{ spCool }`) and `getTargetTempFromStatus` (read → `spCool`), gated on a new `dryUsesSetpoint()` helper. Surfaced `usesSetPointInDryMode` from the `profile_update` payload (was dropped) into `DeviceProfile`. The gate defaults to "has a setpoint" until the async profile loads, so the common case works immediately; units reporting `usesSetPointInDryMode: false` stay setpoint-less (write falls through to the heat branch, read uses the existing fallback)
+  - HomeKit: corrective + additive. A dry unit reads as `TargetHeatingCoolingState === 0` (OFF) on the Thermostat, so the stock Home app surfaces no dry-setpoint UI; this fixes the value/route for clients that read the raw `TargetTemperature` characteristic. Heat/cool/auto untouched. The 1.5.2 off-guard is unaffected (a dry unit has `power===1, operationMode==='dry'`)
+  - `node:test` regression (`test/dry-setpoint.test.js`): dry write→`{spCool}`, dry write before profile loads→`{spCool}`, gated-false dry→`{spHeat}`, cool/heat controls, dry read→`spCool`, gated-false read→fallback. Proven to fail the 3 core cases against the pre-fix build
+  - Code: `accessory.ts:setTargetTemperature / getTargetTempFromStatus / dryUsesSetpoint`, `settings.ts:DeviceProfile`, `kumo-api.ts:profile_update handler`
 - **1.5.2** - Don't send a setpoint to a powered-off unit (June 2026)
   - Fixed: setting a TargetTemperature while a unit is off sent a bare `{ spHeat }` with no `operationMode`, which the Kumo v3 API rejects with `modeRequiredWhenDeviceOff` (HTTP 400). Every such attempt logged a cluster of red errors (`Request failed with status: 400` → `Send command failed` → `Failed to set target temperature`)
   - Real-world trigger: a HomeKit automation/scene that turns the AC off (e.g. "off when the skylight opens") captures each thermostat's *full* state, so firing it re-pushes the last setpoint alongside `off`. The `off` succeeded; the trailing setpoint on the now-off unit produced the 400s. The "all units, same second, `HomeKit sent`" log signature distinguishes a controller-pushed burst from a user tap
