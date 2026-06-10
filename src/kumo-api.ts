@@ -724,6 +724,7 @@ export class KumoAPI {
           numberOfFanSpeeds: data.numberOfFanSpeeds ?? 3,
           hasFanSpeedAuto: data.hasFanSpeedAuto ?? true,
           hasModeDry: data.hasModeDry ?? false,
+          usesSetPointInDryMode: data.usesSetPointInDryMode ?? false,
           hasModeHeat: data.hasModeHeat ?? true,
           hasModeVent: data.hasModeVent ?? false,
           hasVaneDir: data.hasVaneDir ?? false,
