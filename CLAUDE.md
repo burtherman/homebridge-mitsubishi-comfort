@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.5.3
+**Current Version:** 1.6.0
 
 ## Architecture Overview
 
@@ -319,6 +319,8 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 |----------------------|----------------|-------|
 | CurrentTemperature | roomTemp | In Celsius |
 | TargetTemperature | spHeat/spCool | Depends on mode. Dry → `spCool` (Kumo v3 keeps the dry setpoint there; no `spDry` field), gated on `usesSetPointInDryMode` |
+| HeatingThresholdTemperature | spHeat | The low/heat edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
+| CoolingThresholdTemperature | spCool | The high/cool edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
 | CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL |
 | TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO |
 | CurrentRelativeHumidity | humidity | Optional sensor |
@@ -326,6 +328,18 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
 | Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` service; ON sends `vent`, OFF sends `off` (powers the unit down) |
 | Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` service; ON sends `dry`, OFF sends `off`. Capability-gated on `hasModeDry`. Mutually exclusive with the Fan switch |
+
+### AUTO dual setpoints
+
+In AUTO, the Home app shows a temperature *range* (two handles) instead of a single setpoint, via the optional `HeatingThresholdTemperature` and `CoolingThresholdTemperature` characteristics on the Thermostat service.
+
+- **Heating handle ↔ `spHeat`** (low/heat edge), **cooling handle ↔ `spCool`** (high/cool edge). These units report `spAuto: null` and `autoModeDisable: false`, so AUTO uses the `spHeat`/`spCool` band — live-verified (every poll showed `Auto: null` with independent setpoints).
+- Both characteristics are added in the constructor (so they publish through the normal discovery path — no `publishStructureChange` needed) and their props are set to the device's supported range in `applyDeviceProfile`.
+- **Writes are independent:** dragging the heating handle sends `{ spHeat }`, the cooling handle sends `{ spCool }` — neither clobbers the other edge. Both inherit the 1.5.2 powered-off guard (cache + echo, no `modeRequiredWhenDeviceOff` 400) and revert on failure.
+- Zone/streaming updates sync both handles. The Home app only surfaces them in AUTO, so refreshing them in HEAT/COOL is harmless even when a unit's stale `spHeat`/`spCool` are inverted (each characteristic is independent within its own min/max props).
+- `TargetTemperature` and the HEAT/COOL/DRY paths are untouched.
+- Code: `accessory.ts:getHeatingThresholdTemperature / getCoolingThresholdTemperature / setThresholdTemperature`
+- Live-verified end-to-end on real hardware (2026-06-14): both handles round-trip to `spHeat`/`spCool`, the cloud holds the band across a streaming reconcile.
 
 ### Fan-only switch
 
@@ -416,6 +430,14 @@ When making changes, verify:
 
 ## Version History
 
+- **1.6.0** - AUTO-mode dual setpoints (June 2026)
+  - In AUTO the Home app now shows a temperature range (two handles) instead of a single collapsed setpoint. Exposes the optional `HeatingThresholdTemperature` (↔ `spHeat`, low/heat edge) and `CoolingThresholdTemperature` (↔ `spCool`, high/cool edge) on the Thermostat service
+  - Before: in AUTO the plugin returned only the single `TargetTemperature`, which fell back to `spHeat` because these units report `spAuto: null` — so the cooling edge of the band was invisible and unsettable
+  - Live-confirmed (real account + Pi): all 5 units report `autoModeDisable: false` (auto IS supported) and `spAuto: null` (so AUTO uses the `spHeat`/`spCool` band, not a single center). End-to-end on Front bedroom via config-ui-x: AUTO engaged, cooling handle → `{spCool}` and heating handle → `{spHeat}` independently (no clobber), cloud held the band across a streaming reconcile
+  - Writes are independent and inherit the 1.5.2 powered-off guard (cache + echo, no `modeRequiredWhenDeviceOff` 400) + revert-on-failure. Zone/streaming updates sync both handles. `TargetTemperature` and the HEAT/COOL/DRY paths are untouched (additive change)
+  - Characteristics added in the constructor so they publish via the normal discovery path; props set from the device profile range in `applyDeviceProfile`
+  - `node:test` regression (`test/auto-setpoint.test.js`, 9 cases): read sync, independent spHeat/spCool writes, the two-handle drag staying two-sided, off-guard, and heat/cool controls proving no regression. 29 tests total green
+  - Code: `accessory.ts:getHeatingThresholdTemperature / getCoolingThresholdTemperature / setThresholdTemperature / applyDeviceProfile / processZoneUpdate`
 - **1.5.3** - Route the Dry-mode setpoint to `spCool` (June 2026)
   - Fixed: in Dry mode the plugin read and wrote the temperature setpoint to `spHeat`, but the Kumo v3 cloud keeps the dry setpoint in `spCool` (there is no `spDry` field). So dry-mode temperature changes silently did nothing — the cloud accepted the `spHeat` write but the unit ignored it, and out-of-range values 400'd with `invalidSpHeatRange`. Reads surfaced the wrong field (e.g. a unit in dry reporting `spCool=25, spHeat=23` showed 23°C)
   - Live-confirmed (real account, `app-prod.kumocloud.com/v3`): four dry captures held the setpoint in `spCool`; `GET /devices/{serial}/profile` returns `usesSetPointInDryMode: true`; a `POST /devices/send-command {commands:{spCool:24}}` round-trip was adopted and the unit stayed in dry (no flip to cool, no `operationMode` needed)

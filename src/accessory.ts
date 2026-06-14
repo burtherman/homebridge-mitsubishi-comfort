@@ -59,6 +59,26 @@ export class KumoThermostatAccessory {
       .onGet(this.getTargetTemperature.bind(this))
       .onSet(this.setTargetTemperature.bind(this));
 
+    // AUTO-mode dual setpoints. HomeKit's Thermostat surfaces a temperature
+    // *range* (two handles) when TargetHeatingCoolingState === AUTO and these
+    // optional characteristics are present: HeatingThreshold = the low/heat bound
+    // (spHeat), CoolingThreshold = the high/cool bound (spCool). Calling
+    // getCharacteristic adds them to the service; doing it here (during discovery,
+    // before the accessory is (re)published) means they reach HomeKit without a
+    // separate publishStructureChange. Outside AUTO the Home app ignores them and
+    // shows the single TargetTemperature. These units report spAuto: null and use
+    // the spHeat/spCool band for auto — verified against live device data.
+    const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.5 };
+    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+      .setProps(wideThresholdProps)
+      .onGet(this.getHeatingThresholdTemperature.bind(this))
+      .onSet(this.setHeatingThresholdTemperature.bind(this));
+
+    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
+      .setProps(wideThresholdProps)
+      .onGet(this.getCoolingThresholdTemperature.bind(this))
+      .onSet(this.setCoolingThresholdTemperature.bind(this));
+
     // Note: TemperatureDisplayUnits characteristic is not exposed since the temperature
     // unit preference is account-wide in Kumo Cloud, not per-device
 
@@ -125,6 +145,13 @@ export class KumoThermostatAccessory {
         maxValue: maxTemp,
         minStep: 0.5,
       });
+
+    // Constrain the AUTO band handles to the same supported range so neither the
+    // heating nor cooling threshold can be dragged outside the unit's limits.
+    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.5 });
+    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
+      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.5 });
 
     const minTempF = (minTemp * 9 / 5) + 32;
     const maxTempF = (maxTemp * 9 / 5) + 32;
@@ -567,6 +594,24 @@ export class KumoThermostatAccessory {
         );
       }
 
+      // Keep the AUTO-mode threshold characteristics in sync with the live band.
+      // The Home app only surfaces these in AUTO; refreshing them in any mode is
+      // harmless (each is independent within its own min/max props, so a unit
+      // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
+      // HomeKit constraint — the values just aren't shown until AUTO is selected).
+      if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.HeatingThresholdTemperature,
+          status.spHeat,
+        );
+      }
+      if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.CoolingThresholdTemperature,
+          status.spCool,
+        );
+      }
+
       // Only update humidity if the device has a humidity sensor
       if (this.hasHumiditySensor && status.humidity !== null) {
         this.service.updateCharacteristic(
@@ -887,6 +932,91 @@ export class KumoThermostatAccessory {
       // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
+    }
+  }
+
+  // ---- AUTO-mode dual setpoints -------------------------------------------
+  // In AUTO the Home app shows a range; the heating handle reads/writes spHeat
+  // and the cooling handle reads/writes spCool (these units have no spAuto).
+
+  async getHeatingThresholdTemperature(): Promise<CharacteristicValue> {
+    return this.getThresholdTemperature('spHeat', 20);
+  }
+
+  async getCoolingThresholdTemperature(): Promise<CharacteristicValue> {
+    return this.getThresholdTemperature('spCool', 24);
+  }
+
+  private getThresholdTemperature(field: 'spHeat' | 'spCool', fallback: number): number {
+    if (!this.currentStatus) {
+      return fallback;
+    }
+    const v = this.currentStatus[field];
+    if (v === undefined || v === null || isNaN(v)) {
+      return fallback;
+    }
+    return v;
+  }
+
+  async setHeatingThresholdTemperature(value: CharacteristicValue) {
+    await this.setThresholdTemperature('spHeat', value as number);
+  }
+
+  async setCoolingThresholdTemperature(value: CharacteristicValue) {
+    await this.setThresholdTemperature('spCool', value as number);
+  }
+
+  /**
+   * Write one edge of the AUTO setpoint band. HomeKit pushes these when the user
+   * drags the range handles in AUTO: spHeat is the low/heat bound, spCool the
+   * high/cool bound. Mirrors setTargetTemperature — same powered-off guard (the
+   * v3 API 400s a bare setpoint on an off unit, see 1.5.2), optimistic echo, and
+   * revert-on-failure. spHeat/spCool are always the per-mode setpoints, so this
+   * is safe even on the rare out-of-AUTO write.
+   */
+  private async setThresholdTemperature(field: 'spHeat' | 'spCool', temp: number): Promise<void> {
+    const characteristic = field === 'spHeat'
+      ? this.platform.Characteristic.HeatingThresholdTemperature
+      : this.platform.Characteristic.CoolingThresholdTemperature;
+    const label = field === 'spHeat' ? 'AUTO HEAT SP' : 'AUTO COOL SP';
+    const fallback = field === 'spHeat' ? 20 : 24;
+
+    const tempF = (temp * 9 / 5) + 32;
+    this.platform.log.info(
+      `[${label}] ${this.accessory.displayName}: HomeKit sent ${temp.toFixed(1)}°C (${tempF.toFixed(1)}°F)`,
+    );
+
+    if (!this.currentStatus) {
+      this.platform.log.error(`[${label}] ${this.accessory.displayName}: no current status`);
+      return;
+    }
+
+    // Don't send a setpoint to a powered-off unit (1.5.2): cache + echo only so
+    // the handle holds, without a doomed `modeRequiredWhenDeviceOff` 400.
+    if (this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off') {
+      this.platform.log.debug(
+        `[${label}] ${this.accessory.displayName}: unit is off — caching ${temp}°C without sending`,
+      );
+      this.currentStatus[field] = temp;
+      this.service.updateCharacteristic(characteristic, temp);
+      return;
+    }
+
+    const commands: { spHeat?: number; spCool?: number } = {};
+    commands[field] = temp;
+
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
+
+    if (success) {
+      this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
+      this.currentStatus[field] = temp;
+      this.service.updateCharacteristic(characteristic, temp);
+    } else {
+      this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
+      // Revert the handle to the actual device state
+      setTimeout(() => {
+        this.service.updateCharacteristic(characteristic, this.getThresholdTemperature(field, fallback));
+      }, 100);
     }
   }
 
