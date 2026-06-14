@@ -18,6 +18,14 @@ export interface KumoConfig {
   streamingHealthCheckInterval?: number;
   streamingStaleThreshold?: number;
   degradedPollInterval?: number;
+  // Local LAN control (opt-in). When true, the plugin discovers each unit's IP on
+  // the LAN and controls/reads it directly, falling back to cloud per-unit when a
+  // unit is unreachable. Cloud streaming stays connected as the fallback.
+  localControl?: boolean;
+  // Optional manual serial -> IP overrides (skip discovery for these units).
+  localControlIps?: Record<string, string>;
+  // Seconds between local status polls (default 15).
+  localPollInterval?: number;
 }
 
 export interface LoginResponse {

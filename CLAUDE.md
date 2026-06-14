@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.6.0
+**Current Version:** 1.7.0
 
 ## Architecture Overview
 
@@ -288,6 +288,9 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `streamingStaleThreshold` - Deprecated (no longer used, kept for compatibility)
 - `excludeDevices` - Array of device serials to skip
 - `debug` - Enable debug logging
+- `localControl` - **Opt-in (default false).** Control units directly over the LAN; cloud stays for discovery/credentials and as a per-unit fallback. See "Local LAN Control". Requires a full homebridge restart to toggle (child bridge).
+- `localPollInterval` - Seconds between local status polls when `localControl` is on (default: 15, min: 5, max: 120)
+- `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
 
 **Recommended Configuration (Optimal Efficiency):**
 ```json
@@ -365,6 +368,60 @@ HomeKit's `Thermostat` service has no dehumidify target state either, so dry is 
 - **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). The thermostat tile still shows OFF in dry (`TargetHeatingCoolingState === 0`), so the stock Home app surfaces no dry-setpoint UI — but raw-characteristic clients (e.g. the Portal dashboard) can now read and set it. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
 - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 
+## Local LAN Control (since 1.7.0, opt-in)
+
+Direct control of the indoor units over the LAN, modeled on Home Assistant's
+official `mitsubishi_comfort` integration (`iot_class: local_polling`). **Opt-in
+via `localControl: true` (default off).** When off, behavior is unchanged (pure
+cloud). When on, the plugin controls/reads each reachable unit directly and falls
+back to the cloud per-unit; cloud streaming stays connected as the fallback.
+
+**The local protocol** (`src/local-api.ts`) — a port of [pykumo](https://github.com/dlarrick/pykumo),
+byte-for-byte identical to the `mitsubishi-comfort` library behind HA's integration,
+and live-verified against real hardware:
+- `PUT http://<ip>/api?m=<token>` (plain HTTP). Body `{"c":{"indoorUnit":{"status":{...}}}}`.
+  A status read sends empty leaves; the unit echoes values back under `"r"`.
+- `computeLocalToken()`: two SHA-256s over an 88-byte buffer (a fixed `W_PARAM`
+  constant + `sha256(password ‖ body)` + `0x0840` + `S_PARAM=0` + a shuffled slice
+  of the cryptoSerial).
+- Local field names differ: `mode` (not `operationMode`), `vaneDir` (not
+  `airDirection`). **No `power` field — `mode:"off"` is off.** `filterDirty` /
+  `defrost` / `standby` are in the local status; **humidity is not** (it's a separate
+  sensors/MHK2 query, sensor-equipped units only) so it stays cloud-sourced.
+- `LocalKumoClient`: a per-device request mutex (the adapter tolerates ~one
+  concurrent local connection — pykumo locks, the HA lib dropped it, we keep it) and
+  a forgiving `Promise.race` timeout (node-fetch v3 dropped the `timeout` option).
+
+**Credentials** (two per device, both already reachable from the cloud):
+- `password` (base64) — arrives ONLY in the `adapter_update` Socket.IO event we
+  already subscribe to (captured in `kumo-api.ts`, still stripped from logs).
+- `cryptoSerial` (hex, 9 bytes) — `GET /devices/{serial}/status` (`getDeviceCryptoSerial`).
+
+**Discovery** (`discoverDeviceIps`): the cloud provides neither IP nor MAC, so the
+plugin sweeps the host's /24 and matches each device to the adapter that
+authenticates its token (`r.indoorUnit` = match, `_api_error` = other Kumo unit).
+~5–30s for a /24 (verified: found all 5 units). `localControlIps` config skips the
+sweep for listed serials.
+
+**Integration:**
+- `platform.initLocalControl()` runs in the background after streaming connects:
+  waits for passwords, pairs with cryptoSerials, resolves IPs, starts local polling
+  (`localPollInterval`, default 15s). `getHostIpv4()` derives the subnet (prefers
+  private-LAN over CGNAT/VPN like Tailscale).
+- `accessory.sendDeviceCommand()`: local-first, cloud fallback (a failed/unreachable
+  local send falls through to cloud).
+- `accessory.updateFromLocal()`: feeds a local read into `processZoneUpdate` (source
+  `'local'`), preserving streaming-sourced humidity.
+- **Local-authoritative:** while a local poll arrived within 45s, cloud updates are
+  dropped so the cloud's ~7–10s lag can't clobber fresher local data.
+- Code: `src/local-api.ts`, `platform.ts:initLocalControl/getHostIpv4/startLocalPolling`,
+  `accessory.ts:sendDeviceCommand/updateFromLocal`, `kumo-api.ts:onAdapterPassword/getDeviceCryptoSerial`.
+
+**Operational note:** child-bridge accessories get their config from the *parent*
+homebridge process. Toggling `localControl` requires a **full homebridge restart**
+(restart the main process), not just a child-bridge restart — the child reloads code
+but not config.
+
 ## Development Notes
 
 ### Testing Streaming
@@ -430,6 +487,15 @@ When making changes, verify:
 
 ## Version History
 
+- **1.7.0** - Local LAN control + 0.1°C setpoint step (June 2026)
+  - **Opt-in local control** (`localControl: true`, default off): control/read each unit directly over the LAN, falling back to cloud per-unit; cloud streaming stays as the fallback. Modeled on HA's `mitsubishi_comfort` integration. See the "Local LAN Control" section
+  - New `src/local-api.ts`: the pykumo token algorithm (live-verified against real hardware — a signed status read returned 200, and a command was accepted), `LocalKumoClient` (per-device mutex + forgiving timeout), command/status mapping (`mode`/`vaneDir`, no `power`, 0.1 rounding), and LAN discovery (sweep + token-match, since the cloud gives no IP/MAC)
+  - Credentials reuse what we already see: local `password` from the `adapter_update` socket event (was stripped + discarded), `cryptoSerial` from `/devices/{serial}/status` (was fetched + unused)
+  - Local-authoritative status: while a local poll is fresh (≤45s), cloud updates are dropped so the cloud's ~7–10s lag can't clobber it
+  - **0.1°C setpoint step** (`minStep` 0.5→0.1 on TargetTemperature + the AUTO threshold handles): HomeKit is Celsius-native, so 0.5 forced "72°F" to snap to 22.5°C and read back as 73°F in the Kumo app. 0.1 lets 72°F store as ~22.2°C and round-trip faithfully. Live-verified the units honor 0.1°C (the cloud stored a 23.3 setpoint exactly). Applies to the cloud path too
+  - Live-verified end-to-end on the Pi: 5/5 units discovered + controlled locally, polling at 15s, zero errors; the deployed module's read + command both round-tripped against hardware
+  - `node:test`: `test/local-api.test.js` (13 cases) + `test/local-integration.test.js` (6 cases) — token, command builder, status mapping, subnet enumeration, local-first routing, cloud fallback, local-authoritative drop. 48 tests total green
+  - Code: `src/local-api.ts`, `platform.ts`, `accessory.ts`, `kumo-api.ts`, `settings.ts`, `config.schema.json`
 - **1.6.0** - AUTO-mode dual setpoints (June 2026)
   - In AUTO the Home app now shows a temperature range (two handles) instead of a single collapsed setpoint. Exposes the optional `HeatingThresholdTemperature` (↔ `spHeat`, low/heat edge) and `CoolingThresholdTemperature` (↔ `spCool`, high/cool edge) on the Thermostat service
   - Before: in AUTO the plugin returned only the single `TargetTemperature`, which fell back to `spHeat` because these units report `spAuto: null` — so the cooling edge of the band was invisible and unsettable

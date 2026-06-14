@@ -80,6 +80,25 @@
         "minimum": 5,
         "maximum": 60,
         "description": "Fast polling interval when streaming is unhealthy (default: 10 seconds)"
+      },
+      "localControl": {
+        "title": "Enable Local Control (experimental)",
+        "type": "boolean",
+        "default": false,
+        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. The cloud is still used for discovery, credentials, and as a per-unit fallback. Your Homebridge host must share a network with the units."
+      },
+      "localPollInterval": {
+        "title": "Local Poll Interval (seconds)",
+        "type": "integer",
+        "default": 15,
+        "minimum": 5,
+        "maximum": 120,
+        "description": "How often to read unit status over the LAN when local control is enabled (default: 15)"
+      },
+      "localControlIps": {
+        "title": "Local IP Overrides",
+        "type": "object",
+        "description": "Optional manual { \"<deviceSerial>\": \"<ip>\" } map to skip LAN discovery for specific units (edit via the JSON config editor)."
       }
     }
   },
@@ -115,6 +134,13 @@
         },
         "debug"
       ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Local Control (experimental)",
+      "expandable": true,
+      "expanded": false,
+      "items": ["localControl", "localPollInterval"]
     }
   ]
 }

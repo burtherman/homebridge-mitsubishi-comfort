@@ -40,6 +40,12 @@ export class KumoAPI {
   private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
   private deviceConnectionCallbacks: Set<DeviceConnectionCallback> = new Set();
 
+  // Local-control credentials: the per-device local password arrives only in the
+  // `adapter_update` Socket.IO event (never via REST). We capture it here for the
+  // local LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
+  private adapterPasswords: Map<string, string> = new Map();
+  private adapterPasswordCallbacks: Set<(serial: string, password: string) => void> = new Set();
+
   // Streaming health tracking
   private streamingHealthCallbacks: Set<(isHealthy: boolean) => void> = new Set();
   private healthCheckTimer: NodeJS.Timeout | null = null;
@@ -685,6 +691,18 @@ export class KumoAPI {
         const serial = data.deviceSerial || 'unknown';
         // Strip password before logging
         const { password, ...safeData } = data;
+        // Capture the local password for the LAN transport (it appears ONLY here,
+        // never in a REST response). Keep stripping it from all log output.
+        if (data.deviceSerial && password) {
+          this.adapterPasswords.set(data.deviceSerial, password);
+          for (const cb of this.adapterPasswordCallbacks) {
+            try {
+              cb(data.deviceSerial, password);
+            } catch (e) {
+              this.log.debug('Adapter password callback error');
+            }
+          }
+        }
         this.log.debug(`Adapter update for ${serial}: fw=${safeData.firmwareVersion}, rssi=${safeData.routerRssi}`);
         if (this.debugMode) {
           this.log.debug(`Adapter update detail: ${JSON.stringify(safeData)}`);
@@ -798,6 +816,31 @@ export class KumoAPI {
   // Profile and connection status callbacks
   onDeviceProfileUpdate(callback: DeviceProfileCallback): void {
     this.deviceProfileCallbacks.add(callback);
+  }
+
+  // ---- Local-control credential accessors ---------------------------------
+
+  /** Notified whenever a device's local password arrives via `adapter_update`. */
+  onAdapterPassword(callback: (serial: string, password: string) => void): void {
+    this.adapterPasswordCallbacks.add(callback);
+  }
+
+  /** The captured local password (base64) for a device, if seen yet. */
+  getAdapterPassword(serial: string): string | undefined {
+    return this.adapterPasswords.get(serial);
+  }
+
+  /** Fetch a device's `cryptoSerial` (hex) — the second half of the local key. */
+  async getDeviceCryptoSerial(serial: string): Promise<string | null> {
+    const status = await this.makeAuthenticatedRequest<{ cryptoSerial?: string }>(
+      `/devices/${serial}/status`,
+    );
+    return status?.cryptoSerial ?? null;
+  }
+
+  /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
+  requestAdapterStatus(serial: string): void {
+    this.socket?.emit('force_adapter_request', serial, 'adapterStatus');
   }
 
   onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {
