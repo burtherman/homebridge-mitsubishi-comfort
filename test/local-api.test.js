@@ -13,6 +13,7 @@ const {
   computeLocalToken,
   buildLocalCommandBody,
   mapLocalStatus,
+  enumerateSubnet,
   STATUS_READ_BODY,
 } = require('../dist/local-api.js');
 
@@ -106,4 +107,18 @@ test('boolean status flags default to false when absent', () => {
   assert.strictEqual(mapped.filterDirty, false);
   assert.strictEqual(mapped.defrost, false);
   assert.strictEqual(mapped.standby, false);
+});
+
+// ---- enumerateSubnet ------------------------------------------------------
+
+test('enumerateSubnet returns the /24 minus the host', () => {
+  const ips = enumerateSubnet('192.168.50.244');
+  assert.strictEqual(ips.length, 253, '254 hosts minus self');
+  assert.ok(!ips.includes('192.168.50.244'), 'excludes the host itself');
+  assert.ok(ips.includes('192.168.50.1') && ips.includes('192.168.50.254'), 'spans .1...254');
+  assert.ok(ips.every((ip) => ip.startsWith('192.168.50.')), 'all in the same /24');
+});
+
+test('enumerateSubnet returns [] for a non-IPv4 string', () => {
+  assert.deepStrictEqual(enumerateSubnet('not-an-ip'), []);
 });

@@ -241,3 +241,121 @@ export class LocalKumoClient {
     return r !== null;
   }
 }
+
+// ---- LAN discovery --------------------------------------------------------
+// The cloud provides neither the unit's IP nor its MAC, so we find each unit by
+// sweeping the subnet and seeing which adapter authenticates which device's token.
+
+export interface SerialCreds {
+  password: string; // base64
+  cryptoSerial: string; // hex
+}
+
+/** Enumerate the /24 a host IPv4 sits on (x.y.z.1 .. .254), excluding the host itself. */
+export function enumerateSubnet(hostIpv4: string): string[] {
+  const m = hostIpv4.match(/^(\d+\.\d+\.\d+)\.(\d+)$/);
+  if (!m) {
+    return [];
+  }
+  const prefix = m[1];
+  const self = Number(m[2]);
+  const ips: string[] = [];
+  for (let i = 1; i <= 254; i++) {
+    if (i !== self) {
+      ips.push(`${prefix}.${i}`);
+    }
+  }
+  return ips;
+}
+
+type ProbeResult = 'match' | 'kumo' | null;
+
+/**
+ * Probe one IP with one device's token via a status read:
+ *  - 'match' → the adapter authenticated this device (returns r.indoorUnit): IP found
+ *  - 'kumo'  → a Kumo adapter, but a different device (returns _api_error)
+ *  - null    → unreachable / not a Kumo adapter
+ */
+async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
+  try {
+    const token = computeLocalToken(creds.password, creds.cryptoSerial, STATUS_READ_BODY);
+    const fetchPromise = fetch(`http://${ip}/api?m=${token}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
+      body: STATUS_READ_BODY,
+    });
+    fetchPromise.catch(() => undefined);
+    const res = await Promise.race([
+      fetchPromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+    if (!res) {
+      return null;
+    }
+    const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (json && json.r && typeof json.r === 'object' && (json.r as Record<string, unknown>).indoorUnit) {
+      return 'match';
+    }
+    if (json && json._api_error) {
+      return 'kumo';
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Run `fn` over `items` with at most `limit` in flight at once. */
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let idx = 0;
+  const run = async (): Promise<void> => {
+    while (idx < items.length) {
+      await fn(items[idx++]);
+    }
+  };
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < Math.min(limit, items.length); w++) {
+    workers.push(run());
+  }
+  await Promise.all(workers);
+}
+
+/**
+ * Sweep candidate IPs and return a serial→IP map by matching each device's token
+ * to the adapter that authenticates it. ~5s for a /24 in practice (verified).
+ */
+export async function discoverDeviceIps(
+  log: Logger,
+  candidateIps: string[],
+  creds: Map<string, SerialCreds>,
+  opts: { concurrency?: number; timeoutMs?: number } = {},
+): Promise<Map<string, string>> {
+  const concurrency = opts.concurrency ?? 24;
+  const timeoutMs = opts.timeoutMs ?? 3500;
+  const found = new Map<string, string>();
+  const remaining = new Set(creds.keys());
+
+  await mapLimit(candidateIps, concurrency, async (ip) => {
+    if (remaining.size === 0) {
+      return;
+    }
+    for (const serial of [...remaining]) {
+      const result = await probeIpForSerial(ip, creds.get(serial)!, timeoutMs);
+      if (result === 'match') {
+        found.set(serial, ip);
+        remaining.delete(serial);
+        log.info(`[LOCAL] Discovered ${serial} at ${ip}`);
+        break;
+      }
+      if (result === null) {
+        break; // not a reachable Kumo host — don't bother trying the other serials
+      }
+      // 'kumo': a Kumo adapter that isn't this serial — try the next serial here
+    }
+  });
+
+  if (remaining.size > 0) {
+    log.warn(`[LOCAL] ${remaining.size} device(s) not found on the LAN (will use cloud): ${[...remaining].join(', ')}`);
+  }
+  return found;
+}
