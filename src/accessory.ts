@@ -68,7 +68,13 @@ export class KumoThermostatAccessory {
     // separate publishStructureChange. Outside AUTO the Home app ignores them and
     // shows the single TargetTemperature. These units report spAuto: null and use
     // the spHeat/spCool band for auto — verified against live device data.
-    const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.5 };
+    // minStep 0.1, not 0.5: HomeKit is Celsius-native and the Home app converts
+    // to °F for display. A 0.5°C step forces "72°F" to snap to 22.5°C, which reads
+    // back as 72.5°F → the Kumo app shows 73°F (the long-standing app-vs-HomeKit
+    // mismatch). 0.1°C lets HomeKit store 72°F as ~22.2°C, which round-trips to
+    // 72°F in both apps. Live-verified the units honor 0.1°C (the cloud stored a
+    // 23.3 setpoint exactly, never snapping to 23.5).
+    const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.1 };
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps(wideThresholdProps)
       .onGet(this.getHeatingThresholdTemperature.bind(this))
@@ -143,15 +149,15 @@ export class KumoThermostatAccessory {
       .setProps({
         minValue: minTemp,
         maxValue: maxTemp,
-        minStep: 0.5,
+        minStep: 0.1, // 0.1°C for faithful °F round-tripping — see constructor note
       });
 
     // Constrain the AUTO band handles to the same supported range so neither the
     // heating nor cooling threshold can be dragged outside the unit's limits.
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
-      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.5 });
+      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.1 });
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
-      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.5 });
+      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.1 });
 
     const minTempF = (minTemp * 9 / 5) + 32;
     const maxTempF = (maxTemp * 9 / 5) + 32;
