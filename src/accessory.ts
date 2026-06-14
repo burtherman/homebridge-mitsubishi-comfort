@@ -1,7 +1,7 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
-import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone } from './settings';
+import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands } from './settings';
 
 export class KumoThermostatAccessory {
   private service: Service;
@@ -13,7 +13,12 @@ export class KumoThermostatAccessory {
   private pollIntervalMs: number;
   private hasHumiditySensor: boolean = false;
   private lastUpdateTimestamp: number = 0;
-  private lastUpdateSource: 'streaming' | 'polling' | 'none' = 'none';
+  private lastUpdateSource: 'streaming' | 'polling' | 'local' | 'none' = 'none';
+  private lastLocalUpdateTs: number = 0;
+  // While a local poll has arrived within this window, local is the authoritative
+  // status source and cloud updates are dropped (the cloud lags ~7-10s and would
+  // otherwise clobber fresher local data). Should exceed the local poll interval.
+  private readonly LOCAL_AUTHORITATIVE_MS = 45000;
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
   private filterMaintenanceService: Service | null = null;
@@ -261,7 +266,7 @@ export class KumoThermostatAccessory {
       `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode, power });
+    const success = await this.sendDeviceCommand({ operationMode, power });
 
     if (!success) {
       this.platform.log.error(
@@ -370,7 +375,7 @@ export class KumoThermostatAccessory {
       `[DRY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { operationMode, power });
+    const success = await this.sendDeviceCommand({ operationMode, power });
 
     if (!success) {
       this.platform.log.error(
@@ -506,8 +511,93 @@ export class KumoThermostatAccessory {
     const updateTimestamp = Date.now();
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
-  private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling', timestamp: number) {
+
+  /**
+   * Called by the platform's local poller with a locally-read status.
+   * The local API has no humidity (it lives in a separate sensors/MHK2 query),
+   * so we preserve the last humidity from streaming rather than wiping it.
+   */
+  public updateFromLocal(status: Partial<DeviceStatus>) {
+    if (status.roomTemp === undefined || status.roomTemp === null) {
+      return;
+    }
+    const updateTimestamp = Date.now();
+    const zoneUpdate: Partial<Zone> = {
+      id: this.currentStatus?.id || '',
+      adapter: {
+        id: this.currentStatus?.id || '',
+        deviceSerial: this.deviceSerial,
+        roomTemp: status.roomTemp!,
+        spHeat: status.spHeat!,
+        spCool: status.spCool!,
+        spAuto: status.spAuto ?? null,
+        humidity: this.currentStatus?.humidity ?? null, // local has none — keep streaming's
+        power: status.power!,
+        operationMode: status.operationMode!,
+        previousOperationMode: status.operationMode!,
+        fanSpeed: status.fanSpeed || 'auto',
+        airDirection: status.airDirection || 'auto',
+        connected: true,
+        isSimulator: false,
+        hasSensor: this.currentStatus?.humidity !== null && this.currentStatus?.humidity !== undefined,
+        hasMhk2: false,
+        scheduleOwner: 'adapter',
+        scheduleHoldEndTime: 0,
+      },
+    } as Zone;
+
+    this.processZoneUpdate(zoneUpdate as Zone, 'local', updateTimestamp);
+
+    // Filter / defrost / standby come straight from the local status.
+    if (this.currentStatus) {
+      if (status.filterDirty !== undefined) {
+        this.currentStatus.filterDirty = status.filterDirty;
+      }
+      if (status.defrost !== undefined) {
+        this.currentStatus.defrost = status.defrost;
+      }
+      if (status.standby !== undefined) {
+        this.currentStatus.standby = status.standby;
+      }
+      this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+    }
+  }
+
+  /**
+   * Send a control command, preferring the local LAN path when available and
+   * falling back to the cloud. A failed local send (timeout/unreachable) also
+   * falls back, so a flaky adapter never blocks control.
+   */
+  private async sendDeviceCommand(commands: Commands): Promise<boolean> {
+    const local = this.platform.localClient;
+    if (local && local.hasLocal(this.deviceSerial)) {
+      const ok = await local.sendCommand(this.deviceSerial, commands);
+      if (ok) {
+        this.platform.log.debug(`[LOCAL] ${this.accessory.displayName}: command sent locally`);
+        return true;
+      }
+      this.platform.log.debug(
+        `[LOCAL] ${this.accessory.displayName}: local command failed — falling back to cloud`,
+      );
+    }
+    return this.kumoAPI.sendCommand(this.deviceSerial, commands);
+  }
+
+  private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
     try {
+      // When local control is healthy, it is the authoritative status source: drop
+      // cloud (streaming/polling) updates that would clobber fresher local data,
+      // since the cloud lags ~7-10s. Once local goes stale (unreachable), cloud
+      // updates flow again.
+      if (
+        source !== 'local' &&
+        this.lastLocalUpdateTs > 0 &&
+        (Date.now() - this.lastLocalUpdateTs) < this.LOCAL_AUTHORITATIVE_MS
+      ) {
+        this.platform.log.debug(`[${this.deviceSerial}] Ignoring ${source} update — local is authoritative`);
+        return;
+      }
+
       // Prevent old updates from overwriting newer ones
       if (timestamp < this.lastUpdateTimestamp) {
         this.platform.log.debug(
@@ -520,6 +610,9 @@ export class KumoThermostatAccessory {
       this.lastUpdateTimestamp = timestamp;
       const previousSource = this.lastUpdateSource;
       this.lastUpdateSource = source;
+      if (source === 'local') {
+        this.lastLocalUpdateTs = timestamp;
+      }
 
       if (previousSource !== source && previousSource !== 'none') {
         this.platform.log.debug(`[${this.deviceSerial}] Update source changed: ${previousSource} → ${source}`);
@@ -791,7 +884,7 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${modeName} mode`);
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, {
+    const success = await this.sendDeviceCommand({
       operationMode,
     });
 
@@ -914,7 +1007,7 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Sending to API: ${JSON.stringify(commands)}°C`);
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
+    const success = await this.sendDeviceCommand(commands);
 
     if (success) {
       this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Command accepted by API`);
@@ -1011,7 +1104,7 @@ export class KumoThermostatAccessory {
     const commands: { spHeat?: number; spCool?: number } = {};
     commands[field] = temp;
 
-    const success = await this.kumoAPI.sendCommand(this.deviceSerial, commands);
+    const success = await this.sendDeviceCommand(commands);
 
     if (success) {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);

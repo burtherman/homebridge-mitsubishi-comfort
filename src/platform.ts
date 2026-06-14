@@ -8,9 +8,12 @@ import {
   Characteristic,
 } from 'homebridge';
 
+import * as os from 'os';
+
 import { PLATFORM_NAME, PLUGIN_NAME, KumoConfig } from './settings';
 import { KumoAPI } from './kumo-api';
 import { KumoThermostatAccessory } from './accessory';
+import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
 
 export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
@@ -25,6 +28,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private readonly degradedPollInterval: number;
   private isStreamingHealthy: boolean = false;
   private isDegradedMode: boolean = false;
+
+  // Local LAN control (opt-in). The client is shared with accessories for
+  // local-first command routing; the platform drives discovery + status polling.
+  public localClient: LocalKumoClient | null = null;
+  private localPollTimer: NodeJS.Timeout | null = null;
 
   // Hysteresis for mode switching - prevents rapid oscillation on flaky connections
   private readonly modeChangeHysteresisMs: number = 10000; // 10 second stability required
@@ -109,6 +117,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (this.discoveryRetryTimer) {
       clearTimeout(this.discoveryRetryTimer);
       this.discoveryRetryTimer = null;
+    }
+
+    // Stop local polling
+    if (this.localPollTimer) {
+      clearInterval(this.localPollTimer);
+      this.localPollTimer = null;
     }
 
     // Clean up all site pollers
@@ -331,6 +345,15 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             this.log.info('Strategy: Streaming primary, polling supplemental');
           }
         }
+
+        // Local LAN control (opt-in). Set up in the background: it waits for the
+        // adapter passwords (which arrive via adapter_update after streaming
+        // connects), then discovers each unit's IP. Never blocks startup, and
+        // cloud streaming stays up as the per-unit fallback.
+        if (this.kumoConfig.localControl) {
+          this.initLocalControl(allDeviceSerials).catch(err =>
+            this.log.error('Local control setup failed:', err));
+        }
       }
 
       // Start site-level polling based on configuration and streaming health
@@ -353,6 +376,141 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       this.log.error('Error during device discovery:', error);
       return false;
     }
+  }
+
+  /**
+   * Set up local LAN control: wait for the per-device credentials, resolve each
+   * unit's IP (manual override or LAN sweep), and start local status polling.
+   * Best-effort and per-device — any unit we can't reach locally simply stays on
+   * the cloud path. Runs in the background; never blocks discovery.
+   */
+  private async initLocalControl(serials: string[]): Promise<void> {
+    this.log.info('Local control enabled — gathering credentials...');
+    this.localClient = new LocalKumoClient(this.log);
+
+    // The local password arrives via adapter_update shortly after streaming
+    // connects. Nudge each device and poll for up to ~25s for both halves of the
+    // key (password from the socket, cryptoSerial from REST).
+    for (const serial of serials) {
+      this.kumoAPI.requestAdapterStatus(serial);
+    }
+    const creds = new Map<string, SerialCreds>();
+    const deadline = Date.now() + 25000;
+    while (Date.now() < deadline && creds.size < serials.length) {
+      for (const serial of serials) {
+        if (creds.has(serial)) {
+          continue;
+        }
+        const password = this.kumoAPI.getAdapterPassword(serial);
+        if (!password) {
+          continue;
+        }
+        const cryptoSerial = await this.kumoAPI.getDeviceCryptoSerial(serial);
+        if (cryptoSerial) {
+          creds.set(serial, { password, cryptoSerial });
+        }
+      }
+      if (creds.size < serials.length) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        for (const serial of serials) {
+          if (!creds.has(serial)) {
+            this.kumoAPI.requestAdapterStatus(serial);
+          }
+        }
+      }
+    }
+
+    if (creds.size === 0) {
+      this.log.warn('Local control: no credentials obtained — staying on cloud');
+      this.localClient = null;
+      return;
+    }
+    this.log.info(`Local control: credentials for ${creds.size}/${serials.length} device(s)`);
+
+    // Resolve IPs — configured overrides first, then sweep the LAN for the rest.
+    const manual = this.kumoConfig.localControlIps || {};
+    const toDiscover = new Map<string, SerialCreds>();
+    for (const [serial, c] of creds) {
+      if (manual[serial]) {
+        this.localClient.setCreds(serial, { ...c, ip: manual[serial] });
+        this.log.info(`Local control: ${serial} -> ${manual[serial]} (configured)`);
+      } else {
+        toDiscover.set(serial, c);
+      }
+    }
+    if (toDiscover.size > 0) {
+      const hostIp = this.getHostIpv4();
+      if (!hostIp) {
+        this.log.warn('Local control: could not determine the host LAN subnet for discovery');
+      } else {
+        const candidates = enumerateSubnet(hostIp);
+        this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
+        const ips = await discoverDeviceIps(this.log, candidates, toDiscover);
+        for (const [serial, ip] of ips) {
+          this.localClient.setCreds(serial, { ...toDiscover.get(serial)!, ip });
+        }
+      }
+    }
+
+    const localCount = serials.filter(serial => this.localClient!.hasLocal(serial)).length;
+    if (localCount === 0) {
+      this.log.warn('Local control: no devices reachable on the LAN — staying on cloud');
+      return;
+    }
+    this.log.info(`✓ Local control active for ${localCount}/${serials.length} device(s)`);
+    this.startLocalPolling();
+  }
+
+  /** Find the host's primary private-LAN IPv4 (to derive the sweep subnet). */
+  private getHostIpv4(): string | null {
+    const ifaces = os.networkInterfaces();
+    let fallback: string | null = null;
+    for (const name of Object.keys(ifaces)) {
+      for (const ni of ifaces[name] || []) {
+        if (ni.family !== 'IPv4' || ni.internal || ni.address.startsWith('169.254.')) {
+          continue;
+        }
+        // Prefer a private-LAN address (10/8, 192.168/16, 172.16/12) over e.g. a
+        // CGNAT/VPN range like Tailscale's 100.64/10.
+        if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ni.address)) {
+          return ni.address;
+        }
+        fallback = fallback || ni.address;
+      }
+    }
+    return fallback;
+  }
+
+  /** Poll the locally-reachable units and feed their status into the accessories. */
+  private startLocalPolling(): void {
+    if (this.localPollTimer) {
+      return;
+    }
+    const interval = (this.kumoConfig.localPollInterval || 15) * 1000;
+    this.log.info(`Local status polling every ${interval / 1000}s`);
+
+    const poll = async () => {
+      if (!this.localClient) {
+        return;
+      }
+      for (const handler of this.accessoryHandlers) {
+        const serial = handler.getDeviceSerial();
+        if (!this.localClient.hasLocal(serial)) {
+          continue;
+        }
+        try {
+          const status = await this.localClient.getStatus(serial);
+          if (status) {
+            handler.updateFromLocal(status);
+          }
+        } catch (error) {
+          this.log.debug(`Local poll error for ${serial}: ${(error as Error).message}`);
+        }
+      }
+    };
+
+    poll();
+    this.localPollTimer = setInterval(poll, interval);
   }
 
   private startSitePoller(siteId: string) {
