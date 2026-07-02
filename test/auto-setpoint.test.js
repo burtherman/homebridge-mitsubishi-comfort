@@ -234,3 +234,25 @@ test('COOL-mode TargetTemperature still sends spCool (control)', async () => {
 
   assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23 });
 });
+
+// ---- AUTO single-target write must not collapse the band -----------------
+
+// A HomeKit scene/automation snapshots a thermostat's full state and, on
+// activation, re-sends the *required* single TargetTemperature together with the
+// two threshold characteristics. In AUTO, honoring that single target (spHeat =
+// spCool = temp) collapses the band and races the threshold writes from the same
+// burst. In AUTO the thresholds are authoritative, so the single-target write is
+// ignored.
+test('AUTO-mode TargetTemperature write is ignored (scenes/Siri do not collapse the band)', async () => {
+  const { handler, sendCommandCalls } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'autoCool', spHeat: 20, spCool: 26 }));
+
+  await handler.setTargetTemperature(22);
+
+  assert.strictEqual(sendCommandCalls.length, 0,
+    'a single TargetTemperature write in AUTO sends nothing (band is governed by the thresholds)');
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 20,
+    'the heat edge of the band is untouched');
+  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 26,
+    'the cool edge of the band is untouched');
+});

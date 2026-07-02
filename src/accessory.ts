@@ -991,9 +991,20 @@ export class KumoThermostatAccessory {
     } else if (this.currentStatus.operationMode === 'cool') {
       commands.spCool = temp;
     } else if (this.isAutoMode(this.currentStatus.operationMode)) {
-      // For auto mode, set both setpoints
-      commands.spHeat = temp;
-      commands.spCool = temp;
+      // In AUTO the band is governed by HeatingThresholdTemperature (spHeat) and
+      // CoolingThresholdTemperature (spCool) — added in PR #19. HomeKit's
+      // *required* single TargetTemperature has no meaning in AUTO, but scenes and
+      // automations snapshot a thermostat's full state and re-send TargetTemperature
+      // alongside the two thresholds (and Siri "set to X" sends it alone). Collapsing
+      // to spHeat = spCool = temp here flattens the band, and when a scene fires it
+      // races the independent threshold writes from the same burst — so the band
+      // survives or collapses nondeterministically depending on write order.
+      // Ignore the single-target write in AUTO; the threshold handlers are
+      // authoritative for the band.
+      this.platform.log.debug(
+        `[TEMP CHANGE] ${this.accessory.displayName}: ignoring single TargetTemperature write in AUTO (band governed by Heating/CoolingThreshold)`,
+      );
+      return;
     } else if (this.currentStatus.operationMode === 'dry' && this.dryUsesSetpoint()) {
       // Dry holds its setpoint in spCool, not spHeat (Kumo v3; there is no spDry
       // field). Verified live: the spCool write is adopted and the unit stays in
