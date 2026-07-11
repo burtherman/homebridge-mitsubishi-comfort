@@ -25,6 +25,18 @@ export class KumoThermostatAccessory {
   private fanOnlyService: Service | null = null;
   private dryService: Service | null = null;
   private modelNumberSet: boolean = false;
+  // Timestamp (ms) of the most recent HomeKit "off" request. Within
+  // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
+  // but not sent). An "AC off" scene captures each thermostat's full state and
+  // re-pushes its setpoints (TargetTemperature, and for an AUTO unit the two
+  // threshold handles) alongside OFF; HomeKit dispatches them concurrently in an
+  // arbitrary order. A setpoint landing after the off reaches the LAN adapter as
+  // a bare, mode-less write (local commands carry no power field — see
+  // local-api.ts) and powers the unit back on. The unit is being turned off —
+  // there is nothing to set. Set synchronously before the off command's await so
+  // sibling handlers in the same burst observe it; any active mode clears it.
+  private offRequestedAt = 0;
+  private readonly OFF_SUPPRESS_WINDOW_MS = 4000;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -266,6 +278,8 @@ export class KumoThermostatAccessory {
       `[FAN ONLY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
 
+    this.noteModeIntent(operationMode);
+
     const success = await this.sendDeviceCommand({ operationMode, power });
 
     if (!success) {
@@ -374,6 +388,8 @@ export class KumoThermostatAccessory {
     this.platform.log.info(
       `[DRY] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`,
     );
+
+    this.noteModeIntent(operationMode);
 
     const success = await this.sendDeviceCommand({ operationMode, power });
 
@@ -848,6 +864,33 @@ export class KumoThermostatAccessory {
     return this.deviceProfile === null || this.deviceProfile.usesSetPointInDryMode;
   }
 
+  /**
+   * Record HomeKit's mode intent so a concurrent scene setpoint can't revive a
+   * unit that's being turned off. Called synchronously (before the command's
+   * await) from every mode-changing setter: open the suppression window on
+   * `off`, clear it on any active mode.
+   */
+  private noteModeIntent(operationMode: string): void {
+    this.offRequestedAt = operationMode === 'off' ? Date.now() : 0;
+  }
+
+  /**
+   * Whether a setpoint write should be suppressed (cached + echoed, not sent).
+   * True when the unit is already off, or when a HomeKit off was requested within
+   * OFF_SUPPRESS_WINDOW_MS — the window covers the concurrent "AC off" scene
+   * burst, where the off command's optimistic state update hasn't landed yet.
+   */
+  private shouldSuppressSetpoint(): boolean {
+    if (!this.currentStatus) {
+      return false;
+    }
+    return (
+      this.currentStatus.power === 0 ||
+      this.currentStatus.operationMode === 'off' ||
+      Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS
+    );
+  }
+
   async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
     // Never block on API calls - return cached state or default immediately
     // Updates will come from streaming/polling and update the characteristic
@@ -902,6 +945,11 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${modeName} mode`);
+
+    // Synchronously (before the await) note the off/active intent so a setpoint
+    // write dispatched later in the same scene burst is suppressed rather than
+    // reviving the unit. See offRequestedAt.
+    this.noteModeIntent(operationMode);
 
     const success = await this.sendDeviceCommand({
       operationMode,
@@ -990,9 +1038,9 @@ export class KumoThermostatAccessory {
     // the unit is off, there's nothing to set. Cache the value and echo it back
     // to HomeKit so the slider holds; the setpoint is sent when the unit is
     // turned on (the mode handlers carry it).
-    if (this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off') {
+    if (this.shouldSuppressSetpoint()) {
       this.platform.log.debug(
-        `[TEMP CHANGE] ${this.accessory.displayName}: unit is off — caching ${temp}°C without sending (API rejects a setpoint while off)`,
+        `[TEMP CHANGE] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending (avoids a doomed 400 and a setpoint that would revive the unit)`,
       );
       this.currentStatus.spHeat = temp;
       this.service.updateCharacteristic(
@@ -1109,11 +1157,13 @@ export class KumoThermostatAccessory {
       return;
     }
 
-    // Don't send a setpoint to a powered-off unit (1.5.2): cache + echo only so
-    // the handle holds, without a doomed `modeRequiredWhenDeviceOff` 400.
-    if (this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off') {
+    // Don't send a setpoint to a powered-off (or being-turned-off) unit: cache +
+    // echo only so the handle holds, without a doomed `modeRequiredWhenDeviceOff`
+    // 400 (1.5.2) and without a trailing setpoint reviving a unit an "AC off"
+    // scene is turning off (see offRequestedAt / shouldSuppressSetpoint).
+    if (this.shouldSuppressSetpoint()) {
       this.platform.log.debug(
-        `[${label}] ${this.accessory.displayName}: unit is off — caching ${temp}°C without sending`,
+        `[${label}] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending`,
       );
       this.currentStatus[field] = temp;
       this.service.updateCharacteristic(characteristic, temp);
