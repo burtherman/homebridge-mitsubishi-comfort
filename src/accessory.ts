@@ -284,21 +284,21 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[FAN ONLY] ${this.accessory.displayName}: Command accepted by API`);
 
-    // Optimistic local-state update so the thermostat tile reflects the change immediately
+    // Optimistic local-state update so the thermostat tile reflects the change
+    // immediately, and so the Target state matches what the next poll will report —
+    // vent now maps to COOL, not OFF (same rationale as dry above).
     if (this.currentStatus) {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CurrentHeatingCoolingState,
+        this.mapToCurrentHeatingCoolingState(this.currentStatus),
+      );
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.TargetHeatingCoolingState,
+        this.mapToTargetHeatingCoolingState(this.currentStatus),
+      );
     }
-
-    // Both vent and off map to HomeKit OFF on the thermostat service
-    this.service.updateCharacteristic(
-      this.platform.Characteristic.CurrentHeatingCoolingState,
-      this.platform.Characteristic.CurrentHeatingCoolingState.OFF,
-    );
-    this.service.updateCharacteristic(
-      this.platform.Characteristic.TargetHeatingCoolingState,
-      this.platform.Characteristic.TargetHeatingCoolingState.OFF,
-    );
 
     // Fan-only and dry are mutually exclusive — engaging fan-only means the
     // unit is no longer dehumidifying, so flip the dry switch off optimistically.
@@ -393,21 +393,22 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[DRY] ${this.accessory.displayName}: Command accepted by API`);
 
-    // Optimistic local-state update so the thermostat tile reflects the change immediately
+    // Optimistic local-state update so the thermostat tile reflects the change
+    // immediately, and (critically) so the Target state matches what the next poll
+    // will report — dry now maps to COOL, not OFF. Leaving Target at OFF here would
+    // let an off-automation firing before the next poll be suppressed again.
     if (this.currentStatus) {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CurrentHeatingCoolingState,
+        this.mapToCurrentHeatingCoolingState(this.currentStatus),
+      );
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.TargetHeatingCoolingState,
+        this.mapToTargetHeatingCoolingState(this.currentStatus),
+      );
     }
-
-    // Both dry and off map to HomeKit OFF on the thermostat service
-    this.service.updateCharacteristic(
-      this.platform.Characteristic.CurrentHeatingCoolingState,
-      this.platform.Characteristic.CurrentHeatingCoolingState.OFF,
-    );
-    this.service.updateCharacteristic(
-      this.platform.Characteristic.TargetHeatingCoolingState,
-      this.platform.Characteristic.TargetHeatingCoolingState.OFF,
-    );
 
     // Fan-only and dry are mutually exclusive — engaging dry means the unit is
     // no longer fan-only, so flip the fan switch off optimistically.
@@ -763,6 +764,14 @@ export class KumoThermostatAccessory {
         }
         return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
       }
+      case 'dry':
+      case 'vent':
+        // Report COOL (not OFF) so a running dry/fan-only unit shows as on
+        // ("Cooling") in the Home app rather than a misleading "Off" — the tile's
+        // status label follows this characteristic, and the Dry/Fan switches may be
+        // invisible on already-paired accessories. Pairs with the same dry/vent →
+        // COOL choice in mapToTargetHeatingCoolingState.
+        return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
       case 'off':
       default:
         return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
@@ -782,6 +791,16 @@ export class KumoThermostatAccessory {
       return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
     } else if (this.isAutoMode(status.operationMode)) {
       return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
+    } else if (status.operationMode === 'dry' || status.operationMode === 'vent') {
+      // Dry and fan-only have no HomeKit Thermostat state and are driven by their
+      // dedicated Dry/Fan switches. Report COOL (a running, non-OFF state) rather
+      // than OFF so a scene/automation that sets the Thermostat to Off registers a
+      // real COOL→OFF transition and actually turns the unit off. If we reported OFF
+      // here (as before), iOS would suppress the redundant Off write, the setter
+      // would never fire, and the still-ON Dry/Fan switch would keep the unit
+      // running. mapToCurrentHeatingCoolingState reports COOL too, so the tile shows
+      // the unit as running. COOL fits dry naturally — its setpoint lives in spCool.
+      return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
     }
     return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
   }

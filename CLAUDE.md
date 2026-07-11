@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.7.0
+**Current Version:** 1.7.1
 
 ## Architecture Overview
 
@@ -324,8 +324,8 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 | TargetTemperature | spHeat/spCool | Depends on mode. Dry → `spCool` (Kumo v3 keeps the dry setpoint there; no `spDry` field), gated on `usesSetPointInDryMode` |
 | HeatingThresholdTemperature | spHeat | The low/heat edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
 | CoolingThresholdTemperature | spCool | The high/cool edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
-| CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL |
-| TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO |
+| CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL. Since 1.7.1 **dry and vent report COOL** (not OFF) so a running dehumidify/fan-only unit shows as on ("Cooling"), not a misleading "Off" |
+| TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO. Since 1.7.1 **dry and vent map to COOL** so a scene/automation that sets the thermostat Off registers a real COOL→OFF transition iOS actually sends (it was suppressing the redundant Off→Off, so dry/vent units never turned off). Dry/vent are still *set* via their dedicated switches |
 | CurrentRelativeHumidity | humidity | Optional sensor |
 | FilterChangeIndication | displayConfig.filter | From streaming only |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
@@ -353,7 +353,7 @@ HomeKit's `Thermostat` service has no fan-only target state, so we expose a seco
 - **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
 - The `power` field is sent explicitly on the fan path to match the verified v3 cloud reference ([EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws)); the existing HEAT/COOL/AUTO path still omits `power` since the API derives it from a non-off `operationMode`.
 - The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'vent'`.
-- Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off; engaging the switch optimistically sets the thermostat to OFF (since HomeKit's thermostat service can't represent fan-only).
+- Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off. Engaging the switch optimistically drives the thermostat to its mapped state — since 1.7.1 vent maps to **COOL** (was OFF), so a scene-off registers a real transition (see the 1.7.1 note in Version History); the optimistic update derives both Current/Target from `mapTo*HeatingCoolingState`.
 - Code: `accessory.ts:setupFanOnlySwitch / removeFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
 
 ### Dry switch
@@ -365,7 +365,7 @@ HomeKit's `Thermostat` service has no dehumidify target state either, so dry is 
 - **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
 - The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'dry'`.
 - **Mutually exclusive with fan-only:** engaging dry optimistically flips the Fan switch off, and engaging fan-only flips the Dry switch off; changing the thermostat to HEAT / COOL / AUTO / OFF flips both off. Streaming/polling reconciles as the authoritative backstop. The optimistic cross-flip is unconditional because a successful command always leaves the unit in this switch's mode or `off` — never the sibling's mode.
-- **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). The thermostat tile still shows OFF in dry (`TargetHeatingCoolingState === 0`), so the stock Home app surfaces no dry-setpoint UI — but raw-characteristic clients (e.g. the Portal dashboard) can now read and set it. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
+- **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). Since 1.7.1 a dry unit reports `TargetHeatingCoolingState === COOL` (was OFF), so the stock Home app shows a Cool tile with a settable setpoint while dehumidifying. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
 - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 
 ## Local LAN Control (since 1.7.0, opt-in)
@@ -487,6 +487,13 @@ When making changes, verify:
 
 ## Version History
 
+- **1.7.1** - Dry/vent units now respond to a thermostat "off" (July 2026)
+  - Fixed: a unit running in **dry** (or fan-only **vent**) would not turn off when a HomeKit scene/automation set the thermostat to Off. Root cause: dry/vent have no HomeKit Thermostat state, so the plugin reported the Thermostat as **OFF** while the unit ran (dry/vent were surfaced only through their separate Dry/Fan switches). An off-automation writes `TargetHeatingCoolingState = OFF`; since the thermostat already read OFF in dry, iOS suppressed the redundant write, the setter never fired, no `operationMode:'off'` reached the unit, and the still-ON Dry/Fan switch kept it running
+  - Fix: dry/vent now map to **COOL** on both `mapToTargetHeatingCoolingState` (so the off-write is a real COOL→OFF transition iOS sends) and `mapToCurrentHeatingCoolingState` (so a running dry/vent unit shows as on — "Cooling" — instead of a misleading "Off"; matters because the Dry/Fan switches are often invisible on already-paired accessories per the 1.5.1 cache caveat). COOL fits dry naturally — its setpoint already lives in `spCool`. The optimistic updates in `setDryOn`/`setFanOnlyOn` now derive from these maps so there's no window where the Target is still OFF right after engaging the switch. Dry/vent are still *set* via their dedicated switches; the thermostat OFF path (`operationMode:'off'`) is unchanged and mode-agnostic
+  - **Trade-off:** the tile reads "Cooling" while dehumidifying (HomeKit has no dry/fan state), and any "if AC is cooling" automations will trip on dry/vent. Chosen deliberately over a running unit looking "Off"
+  - Live-verified end-to-end on the Pi (2026-07-10): Rear bedroom set to dry via the Kumo app, the off automation fired, `[MODE CHANGE] Rear bedroom: HomeKit sent OFF mode` appeared (it was suppressed before the fix) and the unit powered down — confirmed off in the Kumo app
+  - `node:test` regression (`test/dry-off-thermostat.test.js`, 9 cases): dry/vent Target non-OFF (COOL), dry/vent Current COOL, genuinely-off still OFF, heat/cool unchanged, off-command still routes to `operationMode:'off'`, optimistic-window Target non-OFF. Watched RED→GREEN. 57 tests total green
+  - Code: `accessory.ts:mapToTargetHeatingCoolingState / mapToCurrentHeatingCoolingState / setDryOn / setFanOnlyOn`
 - **1.7.0** - Local LAN control + 0.1°C setpoint step (June 2026)
   - **Opt-in local control** (`localControl: true`, default off): control/read each unit directly over the LAN, falling back to cloud per-unit; cloud streaming stays as the fallback. Modeled on HA's `mitsubishi_comfort` integration. See the "Local LAN Control" section
   - New `src/local-api.ts`: the pykumo token algorithm (live-verified against real hardware — a signed status read returned 200, and a command was accepted), `LocalKumoClient` (per-device mutex + forgiving timeout), command/status mapping (`mode`/`vaneDir`, no `power`, 0.1 rounding), and LAN discovery (sweep + token-match, since the cloud gives no IP/MAC)
