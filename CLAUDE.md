@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.7.2
+**Current Version:** 1.8.0
 
 ## Architecture Overview
 
@@ -291,6 +291,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `localControl` - **Opt-in (default false).** Control units directly over the LAN; cloud stays for discovery/credentials and as a per-unit fallback. See "Local LAN Control". Requires a full homebridge restart to toggle (child bridge).
 - `localPollInterval` - Seconds between local status polls when `localControl` is on (default: 15, min: 5, max: 120)
 - `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
+- `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
 
 **Recommended Configuration (Optimal Efficiency):**
 ```json
@@ -422,6 +423,73 @@ homebridge process. Toggling `localControl` requires a **full homebridge restart
 (restart the main process), not just a child-bridge restart — the child reloads code
 but not config.
 
+## Device Mirroring (since 1.8.0, opt-in)
+
+Makes one unit (target) follow another (source). **Opt-in via a `mirror` array
+(default absent → the feature is entirely inert, no controller constructed).**
+
+**Contract:**
+- **One-way** source → target. Target changes never feed back.
+- **Edge-triggered:** the target follows the source *only at the moment the source's
+  commanded state changes*. Between source changes the target is free — a manual
+  change to the target sticks until the next source change re-syncs it.
+- **Full re-sync on any source change:** any source change re-applies the source's
+  *full* state (mode + setpoint(s) + fan). So a source **temperature** change also
+  re-syncs mode/power — a manually-off target is turned back on to match.
+- **Source-agnostic:** triggers on the source's *observed actual state*, so a wall
+  thermostat (MHK2) / IR remote, the Kumo app, and HomeKit all fire it. The plugin
+  already watches the unit's real state via streaming + cloud-poll + local-poll; a
+  HomeKit change to the source additionally fires immediately via the setter hook.
+
+**Mechanism:**
+- `src/mirror.ts` — `MirrorController`. Subscribes to each *source* accessory's
+  `onStatusUpdate` hook. Keeps a **mode-aware signature** (only the mode-relevant
+  setpoint(s) + fan, setpoints rounded to 0.1) so a drifting *inactive* setpoint
+  (e.g. spCool while in heat, which the Home app doesn't even show) can't spuriously
+  re-clobber a manually-adjusted target. First observation after (re)start **seeds the
+  baseline without pushing** (a reboot isn't "someone changed the kitchen"). On a real
+  change it debounces ~1s (collapses a mode+setpoint burst / fast drag into one push),
+  then calls each target's `applyMirror`.
+- `accessory.ts:onStatusUpdate / notifyStatusListeners` — fired at the end of
+  `processZoneUpdate` (only on *applied* updates — dropped/stale updates never mirror)
+  and from every setter's success path (so a HomeKit change to the source mirrors
+  without waiting for the streaming/local echo; the controller's signature dedup makes
+  the later echo a no-op).
+- `accessory.ts:applyMirror` (target side) — normalizes mode (`autoHeat`/`autoCool` →
+  `auto`), **clamps** setpoints to the target's own profile range, **capability-guards**
+  (skips + logs if the target can't do the source's dry/vent mode), and sends **one
+  combined atomic command** (`{ operationMode, spHeat?, spCool?, fanSpeedRaw? }`) via the
+  normal local-first `sendDeviceCommand`. A single combined command means the 1.7.2
+  trailing-setpoint race can't recur. Optimistic echo updates the target's tile; the
+  next poll reconciles.
+- **Fan speed** is mirrored via `Commands.fanSpeedRaw` — a verbatim adapter fan-speed
+  string that bypasses the coarse `auto/low/medium/high` enum (which overlaps the local
+  vocabulary with *different* meanings). Written verbatim on the local path
+  (`local-api.ts:buildLocalCommandBody`); folded into `fanSpeed` on the cloud path
+  (`kumo-api.ts:toCloudCommands`, best-effort).
+
+**Latency:** a HomeKit change to the source mirrors in ~1s (debounce) via the setter
+hook; a wall-thermostat / Kumo-app change mirrors when next *observed* — within one
+local poll (~15s with `localControl` on) or a streaming / cloud-poll tick.
+
+**Config:**
+```json
+"mirror": [
+  { "source": "<sourceSerial>", "target": "<targetSerial>" }
+]
+```
+One source may drive several targets (multiple entries). Unknown / self-referential
+entries are warned and skipped at startup. Like `localControl`, `mirror` is read from
+the *parent* Homebridge config, so toggling it needs a **full Homebridge restart**.
+
+**Out of scope:** vane/louver direction, bidirectional sync, mirroring room temp /
+humidity (sensor readings, not settings).
+
+Code: `src/mirror.ts`, `accessory.ts:onStatusUpdate/applyMirror/clampSetpoint/normalizeMirrorMode`,
+`platform.ts` (controller construction/teardown), `settings.ts` (`MirrorPair`/`MirrorState`/`Commands.fanSpeedRaw`),
+`local-api.ts` + `kumo-api.ts` (fan passthrough), `config.schema.json`.
+Spec: `docs/superpowers/specs/2026-07-22-device-mirroring-design.md`.
+
 ## Development Notes
 
 ### Testing Streaming
@@ -487,6 +555,14 @@ When making changes, verify:
 
 ## Version History
 
+- **1.8.0** - Device mirroring: one unit follows another (July 2026)
+  - **Opt-in** via a `mirror` array of `{ source, target }` device-serial pairs (default absent → inert). Makes `target` follow `source`: whenever the source's commanded state changes, the source's full state (mode + setpoints + on/off + fan) is copied to the target. Built for a unit with no wall control (living room) to shadow one that has it (kitchen)
+  - **Edge-triggered + one-way:** the target follows the source only at the moment the source changes; between changes the target is free (a manual target change holds until the next source change). Any source change re-applies the source's *full* state, so a source temp change also re-syncs mode/power (revives a manually-off target — by design)
+  - **Source-agnostic:** triggers on the source's *observed* state, so wall thermostat (MHK2) / IR remote, Kumo app, and HomeKit all fire it. Fired from `processZoneUpdate` (observed changes) + every setter (instant HomeKit changes). Change detection is a **mode-aware signature** (mode-relevant setpoints + fan, rounded 0.1) so inactive-setpoint drift can't spuriously re-clobber the target; first observation after startup seeds the baseline without pushing
+  - **Faithful + safe push:** `applyMirror` normalizes `autoHeat`/`autoCool` → `auto`, clamps setpoints to the target's own range, skips modes the target can't do, and sends **one combined atomic command** (so the 1.7.2 trailing-setpoint race can't recur) via the local-first path. Fan speed mirrored verbatim via new `Commands.fanSpeedRaw` (bypasses the coarse enum locally; folded into `fanSpeed` on cloud)
+  - New `src/mirror.ts` (`MirrorController` + `signature`/`toMirrorState`); `accessory.ts` (`onStatusUpdate`/`notifyStatusListeners` source hook, `applyMirror`/`clampSetpoint`/`normalizeMirrorMode` target side); `platform.ts` (construct/teardown); `local-api.ts` + `kumo-api.ts` (`toCloudCommands`) fan passthrough; `settings.ts`; `config.schema.json`
+  - `node:test`: `test/mirror-controller.test.js`, `test/mirror-apply.test.js`, `test/mirror-hook.test.js`, `test/local-fanspeed-raw.test.js`. 90 tests total green
+  - Spec: `docs/superpowers/specs/2026-07-22-device-mirroring-design.md`. See "Device Mirroring"
 - **1.7.2** - Don't let an "AC off" scene revive the unit it's turning off (July 2026)
   - Fixed: an "AC off" HomeKit **scene** could leave a unit **running (in dry)** right after it fired. A scene is a saved snapshot of each thermostat's full state, so on every trigger it re-pushes `TargetHeatingCoolingState = OFF` *and* the captured setpoints — `TargetTemperature`, and for an AUTO unit the two AUTO band handles (`HeatingThresholdTemperature`/`CoolingThresholdTemperature`). HomeKit dispatches these concurrently in an arbitrary order. A setpoint dispatched **after** the off reached the LAN adapter as a bare, mode-less write (local commands carry no `power` field — `mode` alone carries on/off, see `local-api.ts`), which powered the unit back **on** in its prior mode
   - Root cause: the 1.5.2 powered-off guard suppresses a setpoint only when the *cached* mode already reads off. During the concurrent scene burst the off command's optimistic state update hasn't landed yet, so setpoint handlers still see "on" and send a live command. With local control, that trailing bare setpoint revives the unit

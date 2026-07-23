@@ -1,7 +1,7 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
-import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands } from './settings';
+import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState } from './settings';
 
 export class KumoThermostatAccessory {
   private service: Service;
@@ -37,6 +37,13 @@ export class KumoThermostatAccessory {
   // sibling handlers in the same burst observe it; any active mode clears it.
   private offRequestedAt = 0;
   private readonly OFF_SUPPRESS_WINDOW_MS = 4000;
+
+  // Listeners notified whenever this accessory's state actually changes. The
+  // MirrorController subscribes to a *source* accessory here so it can push the
+  // change to its target(s). Fired from processZoneUpdate (catches wall
+  // thermostat / Kumo app / any observed change) and from the setters (catches a
+  // HomeKit change to this unit without waiting for the streaming/local echo).
+  private statusListeners: Array<(status: DeviceStatus) => void> = [];
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -319,6 +326,9 @@ export class KumoThermostatAccessory {
     if (this.dryService) {
       this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
     }
+
+    // Mirror a HomeKit-driven fan-only toggle to any followers immediately.
+    this.notifyStatusListeners();
   }
 
   private setupDrySwitch(): void {
@@ -431,6 +441,9 @@ export class KumoThermostatAccessory {
     if (this.fanOnlyService) {
       this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
     }
+
+    // Mirror a HomeKit-driven dry toggle to any followers immediately.
+    this.notifyStatusListeners();
   }
 
   private updateFilterMaintenance(filterDirty: boolean): void {
@@ -511,6 +524,29 @@ export class KumoThermostatAccessory {
 
       // Update filter maintenance service
       this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+    }
+  }
+
+  /**
+   * Register a listener fired whenever this accessory's state changes. Used by the
+   * MirrorController to follow a source unit. The listener receives the live
+   * currentStatus; treat it as read-only.
+   */
+  public onStatusUpdate(listener: (status: DeviceStatus) => void): void {
+    this.statusListeners.push(listener);
+  }
+
+  private notifyStatusListeners(): void {
+    if (!this.currentStatus || this.statusListeners.length === 0) {
+      return;
+    }
+    const snapshot = this.currentStatus;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(snapshot);
+      } catch (err) {
+        this.platform.log.error('Status listener error:', err);
+      }
     }
   }
 
@@ -751,6 +787,10 @@ export class KumoThermostatAccessory {
           this.isDryActive(status),
         );
       }
+
+      // Notify mirror listeners — this only runs on an applied update (early
+      // returns above skip it), so a dropped/stale update never mirrors.
+      this.notifyStatusListeners();
     } catch (error) {
       this.platform.log.error('Error updating device status:', error);
     }
@@ -972,6 +1012,9 @@ export class KumoThermostatAccessory {
         this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
       }
 
+      // Mirror a HomeKit-driven mode change to any followers immediately.
+      this.notifyStatusListeners();
+
       // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
       this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${modeName}`);
@@ -1095,6 +1138,9 @@ export class KumoThermostatAccessory {
         temp,
       );
 
+      // Mirror a HomeKit-driven setpoint change to any followers immediately.
+      this.notifyStatusListeners();
+
       // Note: Platform will update on next poll cycle (no per-device polling timer)
     } else {
       this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
@@ -1179,6 +1225,8 @@ export class KumoThermostatAccessory {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
       this.currentStatus[field] = temp;
       this.service.updateCharacteristic(characteristic, temp);
+      // Mirror a HomeKit-driven AUTO-handle change to any followers immediately.
+      this.notifyStatusListeners();
     } else {
       this.platform.log.error(`[${label}] ${this.accessory.displayName}: Failed to set ${field} to ${temp}`);
       // Revert the handle to the actual device state
@@ -1188,6 +1236,158 @@ export class KumoThermostatAccessory {
     }
   }
 
+
+  // ---- Device mirroring (target side) -------------------------------------
+  // Driven by the MirrorController when a source unit changes. Reconstructs a
+  // single atomic command from the source's desired state, clamped to this unit's
+  // own limits — one combined command, so the 1.7.2 trailing-setpoint race cannot
+  // recur. See docs/superpowers/specs/2026-07-22-device-mirroring-design.md.
+
+  /** Clamp a setpoint to this unit's supported range for a mode (no-op until profile loads). */
+  private clampSetpoint(value: number, mode: 'heat' | 'cool' | 'auto'): number {
+    if (typeof value !== 'number' || isNaN(value) || !this.deviceProfile) {
+      return value;
+    }
+    const min = this.deviceProfile.minimumSetPoints[mode];
+    const max = this.deviceProfile.maximumSetPoints[mode];
+    if (typeof min === 'number' && value < min) {
+      return min;
+    }
+    if (typeof max === 'number' && value > max) {
+      return max;
+    }
+    return value;
+  }
+
+  /** Collapse a raw source mode to a command mode (autoHeat/autoCool → auto, off if powered off). */
+  private normalizeMirrorMode(desired: MirrorState): 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
+    if (desired.power === 0 || desired.operationMode === 'off') {
+      return 'off';
+    }
+    const m = desired.operationMode;
+    if (m.startsWith('auto')) {
+      return 'auto';
+    }
+    if (m === 'heat' || m === 'cool' || m === 'dry' || m === 'vent') {
+      return m;
+    }
+    return 'off';
+  }
+
+  /**
+   * Apply a source unit's state to this (target) unit. One combined command
+   * (mode + mode-appropriate setpoint(s) + fan), clamped to this unit's range and
+   * guarded against modes it can't do. Sends via the normal local-first path.
+   */
+  public async applyMirror(desired: MirrorState): Promise<void> {
+    const mode = this.normalizeMirrorMode(desired);
+
+    if (mode === 'dry' && this.deviceProfile && !this.deviceProfile.hasModeDry) {
+      this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target has no dry mode — skipping`);
+      return;
+    }
+    if (mode === 'vent' && this.deviceProfile && !this.deviceProfile.hasModeVent) {
+      this.platform.log.warn(`[MIRROR] ${this.accessory.displayName}: target has no vent mode — skipping`);
+      return;
+    }
+
+    const commands: Commands = {};
+    const fan = desired.fanSpeed;
+    switch (mode) {
+      case 'off':
+        commands.operationMode = 'off';
+        break;
+      case 'heat':
+        commands.operationMode = 'heat';
+        commands.spHeat = this.clampSetpoint(desired.spHeat, 'heat');
+        if (fan) {
+          commands.fanSpeedRaw = fan;
+        }
+        break;
+      case 'cool':
+        commands.operationMode = 'cool';
+        commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
+        if (fan) {
+          commands.fanSpeedRaw = fan;
+        }
+        break;
+      case 'auto':
+        commands.operationMode = 'auto';
+        commands.spHeat = this.clampSetpoint(desired.spHeat, 'auto');
+        commands.spCool = this.clampSetpoint(desired.spCool, 'auto');
+        if (fan) {
+          commands.fanSpeedRaw = fan;
+        }
+        break;
+      case 'dry':
+        commands.operationMode = 'dry';
+        commands.power = 1;
+        if (this.dryUsesSetpoint()) {
+          commands.spCool = this.clampSetpoint(desired.spCool, 'cool');
+        }
+        if (fan) {
+          commands.fanSpeedRaw = fan;
+        }
+        break;
+      case 'vent':
+        commands.operationMode = 'vent';
+        commands.power = 1;
+        if (fan) {
+          commands.fanSpeedRaw = fan;
+        }
+        break;
+    }
+
+    this.platform.log.info(`[MIRROR] ${this.accessory.displayName}: applying ${JSON.stringify(commands)}`);
+    this.noteModeIntent(commands.operationMode!);
+
+    const success = await this.sendDeviceCommand(commands);
+    if (!success) {
+      this.platform.log.error(`[MIRROR] ${this.accessory.displayName}: mirror command failed`);
+      return;
+    }
+
+    // Optimistic echo so the tile reflects the mirror immediately; the next poll
+    // reconciles authoritatively.
+    if (this.currentStatus) {
+      this.currentStatus.operationMode = commands.operationMode!;
+      this.currentStatus.power = commands.operationMode === 'off' ? 0 : 1;
+      if (commands.spHeat !== undefined) {
+        this.currentStatus.spHeat = commands.spHeat;
+      }
+      if (commands.spCool !== undefined) {
+        this.currentStatus.spCool = commands.spCool;
+      }
+      if (fan) {
+        this.currentStatus.fanSpeed = fan;
+      }
+
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CurrentHeatingCoolingState,
+        this.mapToCurrentHeatingCoolingState(this.currentStatus),
+      );
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.TargetHeatingCoolingState,
+        this.mapToTargetHeatingCoolingState(this.currentStatus),
+      );
+      const targetTemp = this.getTargetTempFromStatus(this.currentStatus);
+      if (!isNaN(targetTemp)) {
+        this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, targetTemp);
+      }
+      if (this.dryService) {
+        this.dryService.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isDryActive(this.currentStatus),
+        );
+      }
+      if (this.fanOnlyService) {
+        this.fanOnlyService.updateCharacteristic(
+          this.platform.Characteristic.On,
+          this.isFanOnlyActive(this.currentStatus),
+        );
+      }
+    }
+  }
 
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
     if (!this.currentStatus) {

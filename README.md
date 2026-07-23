@@ -11,6 +11,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 ## Features
 
 - **Local LAN control (opt-in)** — control and read each unit directly over your network, with automatic per-unit cloud fallback ([details](#local-lan-control))
+- **Device mirroring (opt-in)** — make one unit follow another; the target copies the source's mode, setpoints, on/off and fan whenever the source changes ([details](#device-mirroring))
 - **Intelligent streaming-first architecture** with automatic fallback
 - **95% reduction in API calls** when streaming is healthy (optimal mode)
 - **Real-time streaming updates** via Socket.IO for instant status changes
@@ -83,6 +84,7 @@ Add the following to your Homebridge `config.json`:
 | `localControl` | boolean | No | **Opt-in (default: false).** Control units directly over the LAN; cloud stays for discovery/credentials and as a per-unit fallback. See [Local LAN Control](#local-lan-control) |
 | `localPollInterval` | number | No | Seconds between local status polls when `localControl` is on (default: 15, minimum: 5, maximum: 120) |
 | `localControlIps` | object | No | Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units |
+| `mirror` | array | No | **Opt-in (default: absent).** `{ source, target }` device-serial pairs; the target follows the source. See [Device Mirroring](#device-mirroring) |
 
 ### Recommended Configuration for Optimal Efficiency
 
@@ -157,6 +159,37 @@ By default the plugin controls your units through the Kumo Cloud. With `localCon
 - Optional: set `localControlIps` to a `{ "<serial>": "<ip>" }` map to skip discovery (e.g. if you've assigned static IPs).
 - **Toggling `localControl` requires a full Homebridge restart**, not just a child-bridge restart — child bridges receive their config from the main process.
 - Local control is currently marked experimental; if anything misbehaves, set `localControl: false` to return to pure cloud.
+
+## Device Mirroring
+
+Make one unit **follow** another. Useful when a unit has no wall control (only the app) and you want it to shadow a unit you actually operate — for example, the living room mirrors the kitchen.
+
+Add a `mirror` array of `{ source, target }` device-serial pairs (serials appear in the log during device discovery):
+
+```json
+{
+  "platform": "KumoV3",
+  "username": "user@example.com",
+  "password": "password123",
+  "mirror": [
+    { "source": "KITCHENSERIAL", "target": "LIVINGROOMSERIAL" }
+  ]
+}
+```
+
+How it behaves:
+
+- **One-way.** The target follows the source; the source is never affected by the target.
+- **On every source change, it copies the source's full state** — mode (heat/cool/auto/dry/vent/off), the setpoint(s), on/off, and fan speed.
+- **Any control path triggers it.** Because it follows the source's *actual* state, changing the source from its **wall thermostat**, the **Kumo app**, or **HomeKit** all mirror across. HomeKit changes mirror in about a second; wall/app changes mirror when the plugin next reads the source (within one local poll, ~15s with `localControl` on, or a streaming tick otherwise).
+- **Manual target changes stick.** If you adjust the target directly, it stays put until the source changes again — at which point the target re-syncs to the source. (Since any source change re-applies the *full* state, changing only the source's temperature will also turn a manually-off target back on to match.)
+- **Safe across different units.** Setpoints are clamped to the target's own supported range, and a mode the target can't do is skipped.
+
+Notes:
+
+- One source can drive several targets — add one entry per target.
+- Vane/louver direction, room temperature, and humidity are **not** mirrored (those are sensor readings, not settings).
+- Like `localControl`, `mirror` is read from the **parent** Homebridge config, so changing it requires a **full Homebridge restart**.
 
 ## HomeKit Modes & Switches
 

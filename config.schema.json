@@ -99,6 +99,30 @@
         "title": "Local IP Overrides",
         "type": "object",
         "description": "Optional manual { \"<deviceSerial>\": \"<ip>\" } map to skip LAN discovery for specific units (edit via the JSON config editor)."
+      },
+      "mirror": {
+        "title": "Device Mirroring",
+        "type": "array",
+        "description": "Make one unit follow another. Whenever the source changes (via any control — wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "title": "Source Device Serial",
+              "type": "string",
+              "required": true,
+              "placeholder": "e.g., 9X34P008S100095F",
+              "description": "The unit to copy from (found in logs during device discovery)"
+            },
+            "target": {
+              "title": "Target Device Serial",
+              "type": "string",
+              "required": true,
+              "placeholder": "e.g., 9X34P008S100096A",
+              "description": "The unit that follows the source"
+            }
+          }
+        }
       }
     }
   },
@@ -141,6 +165,21 @@
       "expandable": true,
       "expanded": false,
       "items": ["localControl", "localPollInterval"]
+    },
+    {
+      "type": "fieldset",
+      "title": "Device Mirroring",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        {
+          "key": "mirror",
+          "type": "array",
+          "title": "Mirror Pairs",
+          "buttonText": "Add Mirror Pair",
+          "items": ["mirror[].source", "mirror[].target"]
+        }
+      ]
     }
   ]
 }

@@ -26,6 +26,30 @@ export interface KumoConfig {
   localControlIps?: Record<string, string>;
   // Seconds between local status polls (default 15).
   localPollInterval?: number;
+  // Device mirroring (opt-in). Each pair makes `target` follow `source`: whenever
+  // the source's commanded state changes (via any control path — wall thermostat,
+  // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;
+  // a manual change to the target persists until the next source change re-syncs it.
+  mirror?: MirrorPair[];
+}
+
+/** A one-way mirror: `target` follows `source` (both device serials). */
+export interface MirrorPair {
+  source: string;
+  target: string;
+}
+
+/**
+ * The subset of a device's state the mirror copies from source to target.
+ * `operationMode` is the raw status value (may be autoHeat/autoCool); `fanSpeed`
+ * is the raw adapter/cloud fan-speed string (mirrored verbatim).
+ */
+export interface MirrorState {
+  operationMode: string;
+  power: number;
+  spHeat: number;
+  spCool: number;
+  fanSpeed: string;
 }
 
 export interface LoginResponse {
@@ -117,6 +141,11 @@ export interface Commands {
   spCool?: number;
   operationMode?: 'off' | 'heat' | 'cool' | 'auto' | 'vent' | 'dry';
   fanSpeed?: 'auto' | 'low' | 'medium' | 'high';
+  // A verbatim adapter/cloud fan-speed string (e.g. 'quiet', 'powerful'). Used by
+  // the mirror path to copy a fan speed faithfully without collapsing it through
+  // the coarse `fanSpeed` enum. Takes precedence over `fanSpeed` on the local path;
+  // folded into `fanSpeed` on the cloud path (see toCloudCommands).
+  fanSpeedRaw?: string;
   power?: 0 | 1;
 }
 

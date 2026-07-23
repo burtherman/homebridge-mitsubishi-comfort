@@ -16,6 +16,25 @@ import {
   SendCommandResponse,
 } from './settings';
 
+/**
+ * Translate internal Commands to the cloud wire shape. The mirror path carries a
+ * verbatim adapter fan-speed string in `fanSpeedRaw`; the cloud expects `fanSpeed`,
+ * so fold it in (and drop `fanSpeedRaw`) before posting. Best-effort — the cloud
+ * reports these same strings, so echoing one back is accepted. Returns the input
+ * unchanged when there is no `fanSpeedRaw` to translate.
+ */
+export function toCloudCommands(commands: Commands): Commands {
+  if (commands.fanSpeedRaw === undefined) {
+    return commands;
+  }
+  const wire: Commands = { ...commands };
+  if (wire.fanSpeed === undefined) {
+    wire.fanSpeed = wire.fanSpeedRaw as Commands['fanSpeed'];
+  }
+  delete wire.fanSpeedRaw;
+  return wire;
+}
+
 // Event callback types
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
@@ -539,11 +558,12 @@ export class KumoAPI {
   }
 
   async sendCommand(deviceSerial: string, commands: Commands): Promise<boolean> {
-    this.log.debug(`Sending command to device ${deviceSerial}:`, JSON.stringify(commands));
+    const wire = toCloudCommands(commands);
+    this.log.debug(`Sending command to device ${deviceSerial}:`, JSON.stringify(wire));
 
     const request: SendCommandRequest = {
       deviceSerial,
-      commands,
+      commands: wire,
     };
 
     const response = await this.makeAuthenticatedRequest<SendCommandResponse>(

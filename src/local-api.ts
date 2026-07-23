@@ -93,7 +93,13 @@ export function buildLocalCommandBody(commands: Commands): Buffer {
   if (commands.spCool !== undefined) {
     status.spCool = round1(commands.spCool);
   }
-  if (commands.fanSpeed !== undefined) {
+  if (commands.fanSpeedRaw !== undefined) {
+    // Mirror path: the source's raw adapter fan-speed string (e.g. 'quiet',
+    // 'powerful') is already in the local vocabulary — write it verbatim rather
+    // than collapsing it through the coarse enum (which would mis-map, since
+    // 'low'/'auto' overlap between the two vocabularies with different meanings).
+    status.fanSpeed = commands.fanSpeedRaw;
+  } else if (commands.fanSpeed !== undefined) {
     status.fanSpeed = mapFanSpeedToLocal(commands.fanSpeed);
   }
   // Note: commands.power is intentionally ignored — `mode` carries on/off locally.

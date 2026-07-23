@@ -14,6 +14,7 @@ import { PLATFORM_NAME, PLUGIN_NAME, KumoConfig } from './settings';
 import { KumoAPI } from './kumo-api';
 import { KumoThermostatAccessory } from './accessory';
 import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
+import { MirrorController } from './mirror';
 
 export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
@@ -33,6 +34,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // local-first command routing; the platform drives discovery + status polling.
   public localClient: LocalKumoClient | null = null;
   private localPollTimer: NodeJS.Timeout | null = null;
+
+  // Device mirroring (opt-in). Constructed once after discovery when `mirror`
+  // config is present; makes one unit follow another.
+  private mirror: MirrorController | null = null;
 
   // Hysteresis for mode switching - prevents rapid oscillation on flaky connections
   private readonly modeChangeHysteresisMs: number = 10000; // 10 second stability required
@@ -123,6 +128,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (this.localPollTimer) {
       clearInterval(this.localPollTimer);
       this.localPollTimer = null;
+    }
+
+    // Tear down mirroring timers
+    if (this.mirror) {
+      this.mirror.destroy();
+      this.mirror = null;
     }
 
     // Clean up all site pollers
@@ -369,6 +380,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         }
       } else {
         this.log.info('Polling disabled - will activate only if streaming fails');
+      }
+
+      // Device mirroring (opt-in). Construct once — discovery can retry, so guard
+      // on an existing controller to avoid double-registering source listeners.
+      if (!this.mirror && this.kumoConfig.mirror && this.kumoConfig.mirror.length > 0) {
+        this.mirror = new MirrorController(this.log, this.kumoConfig.mirror, this.accessoryHandlers);
+        this.log.info(`Device mirroring enabled for ${this.kumoConfig.mirror.length} pair(s)`);
       }
 
       return true;
