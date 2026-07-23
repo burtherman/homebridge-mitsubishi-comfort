@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.8.0
+**Current Version:** 1.8.1
 
 ## Architecture Overview
 
@@ -555,6 +555,13 @@ When making changes, verify:
 
 ## Version History
 
+- **1.8.1** - Don't let a stale cloud reading revive a mirror target after an off (July 2026)
+  - Fixed: an "AC off" skylight scene turned all units off, but the **living room (mirror target) came back on** while the **kitchen (source) stayed off**. Root cause was a stale cloud reading driving the mirror, not the mirror logic itself: the scene turned the kitchen off over the LAN, but the Kumo cloud lags ~7-10s and a streaming `device_update` still reporting the kitchen as `cool` arrived a few seconds later. The plugin normally ignores cloud/streaming while a local read is recent (the 45s `LOCAL_AUTHORITATIVE_MS` guard), but **only a local *poll* refreshed that window — a local *command* did not**. During the all-units command burst the kitchen's local poll was starved, the window lapsed, the stale `cool` was applied, briefly flipping the kitchen's cached state back on, which fired the source `onStatusUpdate` hook → the mirror sent a **real `cool` command to the living room**. The kitchen self-corrected on its next local poll, but the living room was already physically on and stayed on (edge-triggered — nothing re-pushed off)
+  - Fix: a **successful local command now refreshes `lastLocalUpdateTs`** (marks the unit local-authoritative), exactly as a local poll does. After an `off` the cloud's lagging `cool` is dropped for the 45s window — during which local polls confirm the real `off` — so the kitchen's cached state never flips back on and the mirror never fires a phantom revive. Also fixes the kitchen's *own* tile flickering back to "Cooling" for a few seconds after an off. The mirror is untouched — it still follows the kitchen faithfully; a genuine local change (wall thermostat / Kumo app, observed via local poll) still mirrors normally
+  - One-line change in `accessory.ts:sendDeviceCommand` (bump `lastLocalUpdateTs` on local-command success)
+  - `node:test` regression (`test/mirror-stale-revive.test.js`, 2 cases): a stale cloud `cool` after a local `off` must NOT re-fire the source hook (reproduced the exact `[off, cool]` signature RED→GREEN); a *real* local change after an `off` still fires it (following preserved). 92 tests total green
+  - **Live-verified on the Pi (2026-07-23):** hand-patched + restarted; drove kitchen→cool (mirror carried cool@24 to living in ~11s), kitchen→off (mirror carried off in ~15s), living room held off for ~3 min with no phantom `cool` push
+  - Code: `accessory.ts:sendDeviceCommand`
 - **1.8.0** - Device mirroring: one unit follows another (July 2026)
   - **Opt-in** via a `mirror` array of `{ source, target }` device-serial pairs (default absent → inert). Makes `target` follow `source`: whenever the source's commanded state changes, the source's full state (mode + setpoints + on/off + fan) is copied to the target. Built for a unit with no wall control (living room) to shadow one that has it (kitchen)
   - **Edge-triggered + one-way:** the target follows the source only at the moment the source changes; between changes the target is free (a manual target change holds until the next source change). Any source change re-applies the source's *full* state, so a source temp change also re-syncs mode/power (revives a manually-off target — by design)

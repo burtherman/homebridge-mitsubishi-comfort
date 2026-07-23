@@ -626,6 +626,16 @@ export class KumoThermostatAccessory {
     if (local && local.hasLocal(this.deviceSerial)) {
       const ok = await local.sendCommand(this.deviceSerial, commands);
       if (ok) {
+        // A successful local command makes us authoritative for the unit's state:
+        // we just set it. Mark it local-authoritative (same window a local poll
+        // uses) so the Kumo cloud's ~7-10s lag can't replay the pre-command state
+        // and clobber it. Without this, only a local *poll* refreshed the window —
+        // so when polling was starved during a command burst, a stale cloud/streaming
+        // update could be applied after an `off`, briefly flip the cached state back
+        // on, and fire the mirror hook, reviving a mirror target (2026-07-23 skylight
+        // regression). Local polls (every localPollInterval) confirm the real state
+        // within the window.
+        this.lastLocalUpdateTs = Date.now();
         this.platform.log.debug(`[LOCAL] ${this.accessory.displayName}: command sent locally`);
         return true;
       }
