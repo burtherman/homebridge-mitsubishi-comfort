@@ -16,6 +16,13 @@ import { KumoThermostatAccessory } from './accessory';
 import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
 import { MirrorController } from './mirror';
 
+/** How long the initial credential gather waits before falling back to retries. */
+const LOCAL_CRED_INITIAL_WAIT_MS = 25000;
+/** How often to re-nudge devices that still owe us local credentials. */
+const LOCAL_CRED_RETRY_MS = 60000;
+/** How long each retry pass waits for a nudged device to answer. */
+const LOCAL_CRED_RETRY_WAIT_MS = 10000;
+
 export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
@@ -34,6 +41,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // local-first command routing; the platform drives discovery + status polling.
   public localClient: LocalKumoClient | null = null;
   private localPollTimer: NodeJS.Timeout | null = null;
+  private localSerials: string[] = [];
+  private localCredRetryTimer: NodeJS.Timeout | null = null;
+  private localCredRetryRunning: boolean = false;
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -129,6 +139,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       clearInterval(this.localPollTimer);
       this.localPollTimer = null;
     }
+
+    // Stop the background local-credential retry
+    this.stopLocalCredRetry();
 
     // Tear down mirroring timers
     if (this.mirror) {
@@ -405,15 +418,43 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private async initLocalControl(serials: string[]): Promise<void> {
     this.log.info('Local control enabled — gathering credentials...');
     this.localClient = new LocalKumoClient(this.log);
+    this.localSerials = serials;
 
-    // The local password arrives via adapter_update shortly after streaming
-    // connects. Nudge each device and poll for up to ~25s for both halves of the
-    // key (password from the socket, cryptoSerial from REST).
+    const creds = await this.gatherLocalCreds(serials, LOCAL_CRED_INITIAL_WAIT_MS);
+    if (creds.size > 0) {
+      this.log.info(`Local control: credentials for ${creds.size}/${serials.length} device(s)`);
+      await this.admitLocalDevices(creds);
+    } else {
+      this.log.warn('Local control: no credentials obtained yet — staying on cloud for now');
+    }
+
+    const localCount = this.countLocalDevices();
+    if (localCount > 0) {
+      this.log.info(`✓ Local control active for ${localCount}/${serials.length} device(s)`);
+      this.startLocalPolling();
+    } else {
+      this.log.warn('Local control: no devices reachable on the LAN — staying on cloud');
+    }
+
+    // Some adapters answer `adapterStatus` slowly (or not at all until they
+    // recover from a wedged cloud session), so a fixed startup window silently
+    // strands them on the cloud for the life of the process. Keep nudging the
+    // stragglers in the background and admit each one the moment its
+    // credentials show up.
+    this.scheduleLocalCredRetry();
+  }
+
+  /**
+   * Nudge each device for its `adapter_update` and collect both halves of the
+   * local key (password from the socket, cryptoSerial from REST), giving up
+   * after `waitMs`. Only returns entries for devices that yielded both.
+   */
+  private async gatherLocalCreds(serials: string[], waitMs: number): Promise<Map<string, SerialCreds>> {
     for (const serial of serials) {
       this.kumoAPI.requestAdapterStatus(serial);
     }
     const creds = new Map<string, SerialCreds>();
-    const deadline = Date.now() + 25000;
+    const deadline = Date.now() + waitMs;
     while (Date.now() < deadline && creds.size < serials.length) {
       for (const serial of serials) {
         if (creds.has(serial)) {
@@ -437,15 +478,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         }
       }
     }
+    return creds;
+  }
 
-    if (creds.size === 0) {
-      this.log.warn('Local control: no credentials obtained — staying on cloud');
-      this.localClient = null;
+  /**
+   * Resolve each credentialed device's IP (configured override first, then a LAN
+   * sweep for the rest) and hand it to the local client.
+   */
+  private async admitLocalDevices(creds: Map<string, SerialCreds>): Promise<void> {
+    if (!this.localClient) {
       return;
     }
-    this.log.info(`Local control: credentials for ${creds.size}/${serials.length} device(s)`);
-
-    // Resolve IPs — configured overrides first, then sweep the LAN for the rest.
     const manual = this.kumoConfig.localControlIps || {};
     const toDiscover = new Map<string, SerialCreds>();
     for (const [serial, c] of creds) {
@@ -456,27 +499,91 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         toDiscover.set(serial, c);
       }
     }
-    if (toDiscover.size > 0) {
-      const hostIp = this.getHostIpv4();
-      if (!hostIp) {
-        this.log.warn('Local control: could not determine the host LAN subnet for discovery');
-      } else {
-        const candidates = enumerateSubnet(hostIp);
-        this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
-        const ips = await discoverDeviceIps(this.log, candidates, toDiscover);
-        for (const [serial, ip] of ips) {
-          this.localClient.setCreds(serial, { ...toDiscover.get(serial)!, ip });
-        }
-      }
-    }
-
-    const localCount = serials.filter(serial => this.localClient!.hasLocal(serial)).length;
-    if (localCount === 0) {
-      this.log.warn('Local control: no devices reachable on the LAN — staying on cloud');
+    if (toDiscover.size === 0) {
       return;
     }
-    this.log.info(`✓ Local control active for ${localCount}/${serials.length} device(s)`);
-    this.startLocalPolling();
+    const hostIp = this.getHostIpv4();
+    if (!hostIp) {
+      this.log.warn('Local control: could not determine the host LAN subnet for discovery');
+      return;
+    }
+    const candidates = enumerateSubnet(hostIp);
+    this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
+    const ips = await discoverDeviceIps(this.log, candidates, toDiscover);
+    for (const [serial, ip] of ips) {
+      this.localClient.setCreds(serial, { ...toDiscover.get(serial)!, ip });
+    }
+  }
+
+  private countLocalDevices(): number {
+    if (!this.localClient) {
+      return 0;
+    }
+    return this.localSerials.filter(serial => this.localClient!.hasLocal(serial)).length;
+  }
+
+  private pendingLocalSerials(): string[] {
+    if (!this.localClient) {
+      return [];
+    }
+    return this.localSerials.filter(serial => !this.localClient!.hasLocal(serial));
+  }
+
+  /**
+   * Background retry for devices that haven't yielded local credentials yet.
+   * A nudge is a single socket emit, so retrying costs nothing; the expensive
+   * part (the LAN sweep) only runs when a device actually hands over its
+   * credentials. Stops once every device is local.
+   */
+  private scheduleLocalCredRetry(): void {
+    if (this.localCredRetryTimer || this.pendingLocalSerials().length === 0) {
+      return;
+    }
+    this.localCredRetryTimer = setInterval(() => {
+      void this.retryLocalCreds();
+    }, LOCAL_CRED_RETRY_MS);
+  }
+
+  private async retryLocalCreds(): Promise<void> {
+    // A sweep can outlast the interval; never let two passes overlap.
+    if (this.localCredRetryRunning || !this.localClient) {
+      return;
+    }
+    const pending = this.pendingLocalSerials();
+    if (pending.length === 0) {
+      this.stopLocalCredRetry();
+      return;
+    }
+    this.localCredRetryRunning = true;
+    try {
+      const creds = await this.gatherLocalCreds(pending, LOCAL_CRED_RETRY_WAIT_MS);
+      if (creds.size === 0) {
+        this.log.debug(`Local control: still waiting on ${pending.length} device(s)`);
+        return;
+      }
+      this.log.info(`Local control: credentials arrived for ${creds.size} more device(s)`);
+      await this.admitLocalDevices(creds);
+      const localCount = this.countLocalDevices();
+      if (localCount > 0) {
+        this.log.info(`✓ Local control active for ${localCount}/${this.localSerials.length} device(s)`);
+        // No-op if it's already running.
+        this.startLocalPolling();
+      }
+      if (this.pendingLocalSerials().length === 0) {
+        this.stopLocalCredRetry();
+      }
+    } catch (error) {
+      this.log.debug(`Local control retry failed: ${(error as Error).message}`);
+    } finally {
+      this.localCredRetryRunning = false;
+    }
+  }
+
+  private stopLocalCredRetry(): void {
+    if (this.localCredRetryTimer) {
+      clearInterval(this.localCredRetryTimer);
+      this.localCredRetryTimer = null;
+    }
   }
 
   /** Find the host's primary private-LAN IPv4 (to derive the sweep subnet). */

@@ -38,6 +38,19 @@ export class KumoThermostatAccessory {
   private offRequestedAt = 0;
   private readonly OFF_SUPPRESS_WINDOW_MS = 4000;
 
+  // The off-suppression window above only catches setpoints dispatched *after*
+  // the off. A scene's captured setpoint that lands just *before* it arrives
+  // while the unit is still on, so it sends — and permanently rewrites the
+  // stored setpoint. Observed live 2026-07-26: an "AC off" scene rewrote the
+  // Living room's spCool to its stale captured 25°C, leaving a mirror target
+  // 2.5°C off its source (mirroring is edge-triggered, so nothing corrected it
+  // until the source next changed). Holding each setpoint write briefly closes
+  // the gap in the other direction: an off landing during the hold cancels the
+  // pending send. Keyed per setpoint so the two AUTO handles don't cancel each
+  // other, with a generation counter so a drag only sends its final value.
+  private readonly setpointWriteGen: Map<string, number> = new Map();
+  private readonly SETPOINT_HOLD_MS = 1500;
+
   // Listeners notified whenever this accessory's state actually changes. The
   // MirrorController subscribes to a *source* accessory here so it can push the
   // change to its target(s). Fired from processZoneUpdate (catches wall
@@ -930,6 +943,25 @@ export class KumoThermostatAccessory {
    * OFF_SUPPRESS_WINDOW_MS — the window covers the concurrent "AC off" scene
    * burst, where the off command's optimistic state update hasn't landed yet.
    */
+  /**
+   * Hold a setpoint write for SETPOINT_HOLD_MS before sending it, so a
+   * concurrent "AC off" can cancel it whichever order HomeKit dispatched them in.
+   *
+   *  - 'send'       — go ahead
+   *  - 'superseded' — a newer write to the same setpoint arrived; drop this one
+   *                   silently (don't cache a stale value over the newer one)
+   *  - 'suppressed' — the unit is off / turning off; cache + echo, don't send
+   */
+  private async holdSetpointWrite(key: string): Promise<'send' | 'superseded' | 'suppressed'> {
+    const gen = (this.setpointWriteGen.get(key) || 0) + 1;
+    this.setpointWriteGen.set(key, gen);
+    await new Promise(resolve => setTimeout(resolve, this.SETPOINT_HOLD_MS));
+    if (this.setpointWriteGen.get(key) !== gen) {
+      return 'superseded';
+    }
+    return this.shouldSuppressSetpoint() ? 'suppressed' : 'send';
+  }
+
   private shouldSuppressSetpoint(): boolean {
     if (!this.currentStatus) {
       return false;
@@ -1125,6 +1157,28 @@ export class KumoThermostatAccessory {
       commands.spHeat = temp;
     }
 
+    // Hold briefly so an "AC off" dispatched alongside this setpoint wins
+    // regardless of order (see setpointWriteGen).
+    const hold = await this.holdSetpointWrite('target');
+    if (hold === 'superseded') {
+      return;
+    }
+    if (hold === 'suppressed') {
+      this.platform.log.debug(
+        `[TEMP CHANGE] ${this.accessory.displayName}: unit turned off while held — caching ${temp}°C without sending`,
+      );
+      if (this.currentStatus) {
+        if (commands.spHeat !== undefined) {
+          this.currentStatus.spHeat = commands.spHeat;
+        }
+        if (commands.spCool !== undefined) {
+          this.currentStatus.spCool = commands.spCool;
+        }
+      }
+      this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, temp);
+      return;
+    }
+
     this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Sending to API: ${JSON.stringify(commands)}°C`);
 
     const success = await this.sendDeviceCommand(commands);
@@ -1228,6 +1282,24 @@ export class KumoThermostatAccessory {
 
     const commands: { spHeat?: number; spCool?: number } = {};
     commands[field] = temp;
+
+    // Hold briefly so an "AC off" dispatched alongside this handle wins
+    // regardless of order (see setpointWriteGen). Keyed per field so the two
+    // AUTO handles don't supersede each other.
+    const hold = await this.holdSetpointWrite(field);
+    if (hold === 'superseded') {
+      return;
+    }
+    if (hold === 'suppressed') {
+      this.platform.log.debug(
+        `[${label}] ${this.accessory.displayName}: unit turned off while held — caching ${temp}°C without sending`,
+      );
+      if (this.currentStatus) {
+        this.currentStatus[field] = temp;
+      }
+      this.service.updateCharacteristic(characteristic, temp);
+      return;
+    }
 
     const success = await this.sendDeviceCommand(commands);
 
