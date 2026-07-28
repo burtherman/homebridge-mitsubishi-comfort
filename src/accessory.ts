@@ -3,6 +3,29 @@ import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState } from './settings';
 
+/**
+ * Where a command we sent came from. Logged with every send so "who changed this
+ * unit?" is answerable from the log alone.
+ */
+export type CommandOrigin =
+  | 'homekit:mode'
+  | 'homekit:temp'
+  | 'homekit:threshold'
+  | 'homekit:fan-switch'
+  | 'homekit:dry-switch'
+  | 'mirror';
+
+/**
+ * Collapse power + operationMode into the one label that matters for "is it on,
+ * and doing what". power=0 is off whatever the mode field says.
+ */
+function powerModeLabel(s: { power?: number; operationMode?: string } | null): string {
+  if (!s) {
+    return 'unknown';
+  }
+  return s.power === 0 ? 'off' : (s.operationMode || 'unknown');
+}
+
 export class KumoThermostatAccessory {
   private service: Service;
   private pollTimer: NodeJS.Timeout | null = null;
@@ -37,6 +60,15 @@ export class KumoThermostatAccessory {
   // sibling handlers in the same burst observe it; any active mode clears it.
   private offRequestedAt = 0;
   private readonly OFF_SUPPRESS_WINDOW_MS = 4000;
+  // Origin, resulting power/mode label and time of the last command we sent, so an
+  // observed state change can be attributed to us instead of reported as external.
+  // Attribution requires BOTH a recent send and a matching resulting label — a
+  // window alone would swallow a genuine external change that lands right after
+  // one of our commands, which is exactly the event this logging exists to catch.
+  private lastCommandOrigin: CommandOrigin | null = null;
+  private lastCommandLabel: string | null = null;
+  private lastCommandAt = 0;
+  private readonly ATTRIBUTION_MS = 60000;
 
   // The off-suppression window above only catches setpoints dispatched *after*
   // the off. A scene's captured setpoint that lands just *before* it arrives
@@ -300,7 +332,7 @@ export class KumoThermostatAccessory {
 
     this.noteModeIntent(operationMode);
 
-    const success = await this.sendDeviceCommand({ operationMode, power });
+    const success = await this.sendDeviceCommand({ operationMode, power }, 'homekit:fan-switch');
 
     if (!success) {
       this.platform.log.error(
@@ -414,7 +446,7 @@ export class KumoThermostatAccessory {
 
     this.noteModeIntent(operationMode);
 
-    const success = await this.sendDeviceCommand({ operationMode, power });
+    const success = await this.sendDeviceCommand({ operationMode, power }, 'homekit:dry-switch');
 
     if (!success) {
       this.platform.log.error(
@@ -634,7 +666,25 @@ export class KumoThermostatAccessory {
    * falling back to the cloud. A failed local send (timeout/unreachable) also
    * falls back, so a flaky adapter never blocks control.
    */
-  private async sendDeviceCommand(commands: Commands): Promise<boolean> {
+  private async sendDeviceCommand(commands: Commands, origin: CommandOrigin): Promise<boolean> {
+    // Record intent BEFORE the send: the resulting status update can race back
+    // ahead of the await resolving, and an unattributed echo would be logged as
+    // an external change.
+    this.lastCommandOrigin = origin;
+    this.lastCommandAt = Date.now();
+    if (commands.operationMode !== undefined) {
+      this.lastCommandLabel = commands.operationMode === 'off' ? 'off' : commands.operationMode;
+    }
+
+    const { ok, path } = await this.dispatchCommand(commands);
+    this.platform.log.info(
+      `[CMD] ${this.accessory.displayName} <- ${origin} via ${path}` +
+      `${ok ? '' : ' FAILED'}: ${JSON.stringify(commands)}`,
+    );
+    return ok;
+  }
+
+  private async dispatchCommand(commands: Commands): Promise<{ ok: boolean; path: 'local' | 'cloud' }> {
     const local = this.platform.localClient;
     if (local && local.hasLocal(this.deviceSerial)) {
       const ok = await local.sendCommand(this.deviceSerial, commands);
@@ -649,14 +699,13 @@ export class KumoThermostatAccessory {
         // regression). Local polls (every localPollInterval) confirm the real state
         // within the window.
         this.lastLocalUpdateTs = Date.now();
-        this.platform.log.debug(`[LOCAL] ${this.accessory.displayName}: command sent locally`);
-        return true;
+        return { ok: true, path: 'local' };
       }
       this.platform.log.debug(
         `[LOCAL] ${this.accessory.displayName}: local command failed — falling back to cloud`,
       );
     }
-    return this.kumoAPI.sendCommand(this.deviceSerial, commands);
+    return { ok: await this.kumoAPI.sendCommand(this.deviceSerial, commands), path: 'cloud' };
   }
 
   private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
@@ -733,6 +782,39 @@ export class KumoThermostatAccessory {
         spHeat: zone.adapter.spHeat,
         spAuto: zone.adapter.spAuto,
       };
+
+      // Attribute observed power/mode transitions at INFO. Every command we SEND is
+      // logged ([CMD]), but until this nothing recorded a change made OUTSIDE
+      // Homebridge — the Kumo app, a schedule set there, or the unit itself. On
+      // 2026-07-28 a Living room unit with no wall control went cool -> off with no
+      // command on any logged path, and the log simply could not say what did it.
+      //
+      // Attribution requires a recent send AND a matching resulting label. A time
+      // window alone would silently swallow an external change landing just after
+      // one of our own commands — precisely the case worth catching.
+      const prevLabel = powerModeLabel(this.currentStatus);
+      const nextLabel = powerModeLabel(status);
+      if (this.hasReceivedValidUpdate && prevLabel !== nextLabel) {
+        const recentCommand =
+          this.lastCommandOrigin !== null && (Date.now() - this.lastCommandAt) < this.ATTRIBUTION_MS;
+        let cause: string;
+        if (recentCommand && this.lastCommandLabel === nextLabel) {
+          cause = `ours (${this.lastCommandOrigin})`;
+        } else if (recentCommand) {
+          // A recent command exists but the unit reports something else. Most often
+          // this is the cloud replaying pre-command state (~7-10s lag, see the
+          // local-authoritative window) rather than a person. Do NOT call it
+          // EXTERNAL — crying wolf here would make the signal useless.
+          cause =
+            `UNEXPECTED — we just sent ${this.lastCommandOrigin} (${this.lastCommandLabel}); ` +
+            'likely a stale cloud replay';
+        } else {
+          cause = 'EXTERNAL — Kumo app, a schedule there, or the unit itself';
+        }
+        this.platform.log.info(
+          `[STATE] ${this.accessory.displayName}: ${prevLabel} -> ${nextLabel} (seen via ${source}) — ${cause}`,
+        );
+      }
 
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
@@ -1033,9 +1115,7 @@ export class KumoThermostatAccessory {
     // reviving the unit. See offRequestedAt.
     this.noteModeIntent(operationMode);
 
-    const success = await this.sendDeviceCommand({
-      operationMode,
-    });
+    const success = await this.sendDeviceCommand({ operationMode }, 'homekit:mode');
 
     if (success) {
       this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: Command accepted by API`);
@@ -1181,7 +1261,7 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Sending to API: ${JSON.stringify(commands)}°C`);
 
-    const success = await this.sendDeviceCommand(commands);
+    const success = await this.sendDeviceCommand(commands, 'homekit:temp');
 
     if (success) {
       this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Command accepted by API`);
@@ -1301,7 +1381,7 @@ export class KumoThermostatAccessory {
       return;
     }
 
-    const success = await this.sendDeviceCommand(commands);
+    const success = await this.sendDeviceCommand(commands, 'homekit:threshold');
 
     if (success) {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
@@ -1423,7 +1503,7 @@ export class KumoThermostatAccessory {
     this.platform.log.info(`[MIRROR] ${this.accessory.displayName}: applying ${JSON.stringify(commands)}`);
     this.noteModeIntent(commands.operationMode!);
 
-    const success = await this.sendDeviceCommand(commands);
+    const success = await this.sendDeviceCommand(commands, 'mirror');
     if (!success) {
       this.platform.log.error(`[MIRROR] ${this.accessory.displayName}: mirror command failed`);
       return;
