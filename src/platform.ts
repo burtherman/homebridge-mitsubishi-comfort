@@ -10,8 +10,11 @@ import {
 
 import * as os from 'os';
 
+import * as path from 'path';
+
 import { PLATFORM_NAME, PLUGIN_NAME, KumoConfig } from './settings';
 import { KumoAPI } from './kumo-api';
+import { loadCredStore, saveCredStore } from './cred-store';
 import { KumoThermostatAccessory } from './accessory';
 import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
 import { MirrorController } from './mirror';
@@ -44,10 +47,17 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private localSerials: string[] = [];
   private localCredRetryTimer: NodeJS.Timeout | null = null;
   private localCredRetryRunning: boolean = false;
-  // serial -> legacy-v2 password already handed to discovery, with how many
-  // times. Bounds re-sweeps when the v2 copy is stale (see fillFromLegacyCreds).
+  // serial -> candidate password already handed to discovery (from the disk
+  // store OR the legacy v2 API), with how many times. Bounds re-sweeps when a
+  // candidate is stale (see fillFromLegacyCreds / fillFromStoredCreds). Shared
+  // across both sources on purpose: the same stale password must not get a
+  // fresh budget just because it came from a different cache.
   private legacyCredAttempts = new Map<string, { password: string; attempts: number }>();
   private static readonly LEGACY_CRED_MAX_ATTEMPTS = 3;
+  // On-disk credential cache (see cred-store.ts). null path = disabled (no
+  // storage dir available, e.g. in unit tests with a bare API stub).
+  private credStorePath: string | null = null;
+  private credStore = new Map<string, SerialCreds & { capturedAt: string }>();
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -423,6 +433,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.log.info('Local control enabled — gathering credentials...');
     this.localClient = new LocalKumoClient(this.log);
     this.localSerials = serials;
+    this.initCredStore();
 
     const creds = await this.gatherLocalCreds(serials, LOCAL_CRED_INITIAL_WAIT_MS);
     if (creds.size > 0) {
@@ -482,14 +493,83 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         }
       }
     }
-    // Push creds are collected first and always win — the legacy store only
-    // fills what the socket never delivered (observed: a unit whose
-    // adapter_update simply never arrives, stranding it on cloud forever).
+    // A completed push credential is the freshest possible value — persist it
+    // so the next restart doesn't re-run the adapter's delivery lottery
+    // (observed: 2.5h to first delivery, or never).
+    for (const [serial, c] of creds) {
+      this.persistCred(serial, c);
+    }
+    // Push creds are collected first and always win. Gaps are filled from the
+    // disk store (last known-good, survives restarts), then the legacy v2 API
+    // (external snapshot). Both are candidates only — the signed discovery
+    // probe validates every credential before a device is admitted.
     const missing = serials.filter(s => !creds.has(s));
     if (missing.length > 0) {
-      await this.fillFromLegacyCreds(missing, creds);
+      this.fillFromStoredCreds(missing, creds);
+    }
+    const stillMissing = serials.filter(s => !creds.has(s));
+    if (stillMissing.length > 0) {
+      await this.fillFromLegacyCreds(stillMissing, creds);
     }
     return creds;
+  }
+
+  private initCredStore(): void {
+    try {
+      const dir = this.api?.user?.storagePath?.();
+      if (!dir) {
+        return;
+      }
+      this.credStorePath = path.join(dir, 'mitsubishi-comfort-local-creds.json');
+      this.credStore = loadCredStore(this.credStorePath, this.log);
+      if (this.credStore.size > 0) {
+        this.log.info(`Local control: credential store holds ${this.credStore.size} device(s)`);
+      }
+    } catch (e) {
+      this.log.debug(`Credential store unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Persist a credential if it's new or changed. Never logs the values. */
+  private persistCred(serial: string, c: SerialCreds): void {
+    if (!this.credStorePath) {
+      return;
+    }
+    const prev = this.credStore.get(serial);
+    if (prev && prev.password === c.password && prev.cryptoSerial === c.cryptoSerial) {
+      return;
+    }
+    this.credStore.set(serial, {
+      password: c.password, cryptoSerial: c.cryptoSerial, capturedAt: new Date().toISOString(),
+    });
+    saveCredStore(this.credStorePath, this.credStore, this.log);
+    this.log.info(`[LOCAL] ${serial}: credentials persisted to the local store`);
+  }
+
+  /**
+   * Fill gaps from the on-disk store — the last credential that either arrived
+   * by push or survived probe validation in a previous process. Same candidate
+   * semantics and attempt budget as the v2 path: a password that rotated while
+   * we were down fails the probe and gets burned after 3 tries.
+   */
+  private fillFromStoredCreds(missing: string[], creds: Map<string, SerialCreds>): void {
+    for (const serial of missing) {
+      const candidate = this.credStore.get(serial);
+      if (!candidate) {
+        continue;
+      }
+      const prior = this.legacyCredAttempts.get(serial);
+      const samePassword = prior?.password === candidate.password;
+      if (samePassword && prior!.attempts >= KumoV3Platform.LEGACY_CRED_MAX_ATTEMPTS) {
+        continue;
+      }
+      const attempts = samePassword ? prior!.attempts + 1 : 1;
+      this.legacyCredAttempts.set(serial, { password: candidate.password, attempts });
+      creds.set(serial, { password: candidate.password, cryptoSerial: candidate.cryptoSerial });
+      this.log.info(
+        `[LOCAL] ${serial}: using stored credentials captured ${candidate.capturedAt} ` +
+        `(attempt ${attempts}/${KumoV3Platform.LEGACY_CRED_MAX_ATTEMPTS}; the signed discovery probe validates them)`);
+    }
   }
 
   /**
@@ -559,7 +639,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
     const ips = await discoverDeviceIps(this.log, candidates, toDiscover);
     for (const [serial, ip] of ips) {
-      this.localClient.setCreds(serial, { ...toDiscover.get(serial)!, ip });
+      const c = toDiscover.get(serial)!;
+      this.localClient.setCreds(serial, { ...c, ip });
+      // The probe just proved this credential against the real adapter — persist
+      // it. This is what captures v2-sourced creds: they enter as unvalidated
+      // candidates, and only the validated ones reach the store.
+      this.persistCred(serial, c);
     }
   }
 
