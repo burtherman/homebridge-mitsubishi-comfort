@@ -809,7 +809,11 @@ export class KumoThermostatAccessory {
             `UNEXPECTED — we just sent ${this.lastCommandOrigin} (${this.lastCommandLabel}); ` +
             'likely a stale cloud replay';
         } else {
-          cause = 'EXTERNAL — Kumo app, a schedule there, or the unit itself';
+          // The adapter reports state, never provenance — a wall control, the
+          // Kumo app, a Kumo-side schedule and the unit's own firmware all look
+          // identical from here. The only attributable distinction is ours vs
+          // not-ours.
+          cause = 'EXTERNAL — wall control, Kumo app, a schedule there, or the unit itself';
         }
         this.platform.log.info(
           `[STATE] ${this.accessory.displayName}: ${prevLabel} -> ${nextLabel} (seen via ${source}) — ${cause}`,
