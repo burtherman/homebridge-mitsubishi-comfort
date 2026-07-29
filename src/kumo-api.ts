@@ -6,6 +6,8 @@ import {
   APP_VERSION,
   TOKEN_REFRESH_INTERVAL,
   SOCKET_BASE_URL,
+  LEGACY_API_BASE_URL,
+  LEGACY_APP_VERSION,
   LoginResponse,
   Site,
   Zone,
@@ -63,6 +65,11 @@ export class KumoAPI {
   // `adapter_update` Socket.IO event (never via REST). We capture it here for the
   // local LAN transport (paired with the cryptoSerial from /devices/{serial}/status).
   private adapterPasswords: Map<string, string> = new Map();
+  // Legacy v2 credential cache (see fetchLegacyCredentials). Memory-only like
+  // adapterPasswords; the TTL keeps the minute-cadence cred retry off the wire.
+  private legacyCredsCache: Map<string, { password: string; cryptoSerial: string }> | null = null;
+  private legacyCredsFetchedAt = 0;
+  private static readonly LEGACY_CREDS_TTL_MS = 6 * 60 * 60 * 1000;
   private adapterPasswordCallbacks: Set<(serial: string, password: string) => void> = new Set();
 
   // Streaming health tracking
@@ -861,6 +868,83 @@ export class KumoAPI {
   /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
   requestAdapterStatus(serial: string): void {
     this.socket?.emit('force_adapter_request', serial, 'adapterStatus');
+  }
+
+  /**
+   * Fallback credential source: the LEGACY v2 cloud login still returns every
+   * adapter's local `password` + `cryptoSerial` in plain REST — the same place
+   * pykumo and Home Assistant have always gotten them. The long-standing comment
+   * above ("appears ONLY here") was true of the v3 API but wrong as an absolute:
+   * verified live 2026-07-28, when v2-recovered creds signed a successful local
+   * status read against a unit the socket push had never credentialed.
+   *
+   * The v2 store can be STALE. The same verification found one unit whose
+   * password had rotated (its v2 copy got `device_authentication_error`) while
+   * the socket push had delivered the fresh one. Callers must treat these as
+   * candidates only: socket-push creds always win, and the LAN sweep's signed
+   * probe is the validity gate — a stale password simply never matches, and the
+   * device stays on cloud control exactly as before.
+   *
+   * Cached for LEGACY_CREDS_TTL_MS: the cred-retry loop runs every minute and
+   * must not hammer a legacy endpoint that changes rarely. Secrets are never
+   * logged — counts only.
+   */
+  async fetchLegacyCredentials(): Promise<Map<string, { password: string; cryptoSerial: string }>> {
+    const now = Date.now();
+    if (this.legacyCredsCache && (now - this.legacyCredsFetchedAt) < KumoAPI.LEGACY_CREDS_TTL_MS) {
+      return this.legacyCredsCache;
+    }
+    const found = new Map<string, { password: string; cryptoSerial: string }>();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`${LEGACY_API_BASE_URL}/login`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: this.username, password: this.password, appVersion: LEGACY_APP_VERSION,
+        }),
+        // Node's global AbortSignal vs node-fetch's own signal type — same
+        // object at runtime, disjoint lib typings in this tsconfig.
+        signal: controller.signal as unknown as RequestInit['signal'],
+      });
+      if (!response.ok) {
+        this.log.debug(`Legacy v2 credential fetch: HTTP ${response.status}`);
+        return found;
+      }
+      const data = await response.json();
+      // The device entries live in nested zoneTable objects keyed by serial;
+      // walk the whole response rather than hardcoding the v2 nesting, which
+      // varies with site/group structure.
+      const walk = (node: unknown): void => {
+        if (Array.isArray(node)) {
+          node.forEach(walk);
+          return;
+        }
+        if (!node || typeof node !== 'object') {
+          return;
+        }
+        for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const v = value as Record<string, unknown>;
+            if (typeof v.password === 'string' && typeof v.cryptoSerial === 'string') {
+              found.set(key, { password: v.password, cryptoSerial: v.cryptoSerial });
+            }
+          }
+          walk(value);
+        }
+      };
+      walk(data);
+      this.legacyCredsCache = found;
+      this.legacyCredsFetchedAt = now;
+      this.log.debug(`Legacy v2 credential fetch: entries for ${found.size} device(s)`);
+    } catch (error) {
+      this.log.debug(
+        `Legacy v2 credential fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    return found;
   }
 
   onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {

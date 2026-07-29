@@ -44,6 +44,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private localSerials: string[] = [];
   private localCredRetryTimer: NodeJS.Timeout | null = null;
   private localCredRetryRunning: boolean = false;
+  // serial -> legacy-v2 password already handed to discovery, with how many
+  // times. Bounds re-sweeps when the v2 copy is stale (see fillFromLegacyCreds).
+  private legacyCredAttempts = new Map<string, { password: string; attempts: number }>();
+  private static readonly LEGACY_CRED_MAX_ATTEMPTS = 3;
 
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
@@ -478,7 +482,51 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         }
       }
     }
+    // Push creds are collected first and always win — the legacy store only
+    // fills what the socket never delivered (observed: a unit whose
+    // adapter_update simply never arrives, stranding it on cloud forever).
+    const missing = serials.filter(s => !creds.has(s));
+    if (missing.length > 0) {
+      await this.fillFromLegacyCreds(missing, creds);
+    }
     return creds;
+  }
+
+  /**
+   * Fill credential gaps from the legacy v2 API (see fetchLegacyCredentials for
+   * why this exists and why its data may be stale). Downstream validation is the
+   * LAN sweep's signed probe: a bad password never matches, so the worst case is
+   * identical to having no credential at all. The attempt budget exists because
+   * the cred retry fires every minute — an invalid legacy password would
+   * otherwise trigger a LAN sweep per cycle forever. Three attempts covers a
+   * transiently unreachable adapter; after that the password is burned until the
+   * v2 store rotates it.
+   */
+  private async fillFromLegacyCreds(missing: string[], creds: Map<string, SerialCreds>): Promise<void> {
+    let legacy: Map<string, { password: string; cryptoSerial: string }>;
+    try {
+      legacy = await this.kumoAPI.fetchLegacyCredentials();
+    } catch (e) {
+      this.log.debug(`Legacy credential fallback unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    for (const serial of missing) {
+      const candidate = legacy.get(serial);
+      if (!candidate) {
+        continue;
+      }
+      const prior = this.legacyCredAttempts.get(serial);
+      const samePassword = prior?.password === candidate.password;
+      if (samePassword && prior!.attempts >= KumoV3Platform.LEGACY_CRED_MAX_ATTEMPTS) {
+        continue;   // burned: this password already failed validation repeatedly
+      }
+      const attempts = samePassword ? prior!.attempts + 1 : 1;
+      this.legacyCredAttempts.set(serial, { password: candidate.password, attempts });
+      creds.set(serial, { password: candidate.password, cryptoSerial: candidate.cryptoSerial });
+      this.log.info(
+        `[LOCAL] ${serial}: socket push never delivered credentials — trying the legacy v2 copy ` +
+        `(attempt ${attempts}/${KumoV3Platform.LEGACY_CRED_MAX_ATTEMPTS}; the signed discovery probe validates it)`);
+    }
   }
 
   /**
