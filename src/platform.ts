@@ -17,7 +17,8 @@ import { KumoAPI } from './kumo-api';
 import { loadCredStore, saveCredStore } from './cred-store';
 import { KumoThermostatAccessory } from './accessory';
 import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
-import { MirrorController } from './mirror';
+import { MirrorController, MirrorStatePersistence } from './mirror';
+import { loadMirrorStore, saveMirrorStore } from './mirror-store';
 
 /** How long the initial credential gather waits before falling back to retries. */
 const LOCAL_CRED_INITIAL_WAIT_MS = 25000;
@@ -62,6 +63,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
   private mirror: MirrorController | null = null;
+  private mirrorStorePath: string | null = null;
+  private mirrorStore = new Map<string, string>();
 
   // Hysteresis for mode switching - prevents rapid oscillation on flaky connections
   private readonly modeChangeHysteresisMs: number = 10000; // 10 second stability required
@@ -412,7 +415,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       // Device mirroring (opt-in). Construct once — discovery can retry, so guard
       // on an existing controller to avoid double-registering source listeners.
       if (!this.mirror && this.kumoConfig.mirror && this.kumoConfig.mirror.length > 0) {
-        this.mirror = new MirrorController(this.log, this.kumoConfig.mirror, this.accessoryHandlers);
+        this.initMirrorStore();
+        this.mirror = new MirrorController(
+          this.log, this.kumoConfig.mirror, this.accessoryHandlers, undefined, this.mirrorPersistence());
         this.log.info(`Device mirroring enabled for ${this.kumoConfig.mirror.length} pair(s)`);
       }
 
@@ -512,6 +517,40 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       await this.fillFromLegacyCreds(stillMissing, creds);
     }
     return creds;
+  }
+
+  /**
+   * Cross-restart memory for the mirror's edge detection. Absent a storage dir the
+   * adapter is null and mirroring keeps its original seed-only startup behavior.
+   */
+  private initMirrorStore(): void {
+    try {
+      const dir = this.api?.user?.storagePath?.();
+      if (!dir) {
+        return;
+      }
+      this.mirrorStorePath = path.join(dir, 'mitsubishi-comfort-mirror-state.json');
+      this.mirrorStore = loadMirrorStore(this.mirrorStorePath, this.log);
+    } catch (e) {
+      this.log.debug(`Mirror state store unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private mirrorPersistence(): MirrorStatePersistence | null {
+    const file = this.mirrorStorePath;
+    if (!file) {
+      return null;
+    }
+    return {
+      load: (serial: string) => this.mirrorStore.get(serial) ?? null,
+      save: (serial: string, sig: string) => {
+        if (this.mirrorStore.get(serial) === sig) {
+          return;
+        }
+        this.mirrorStore.set(serial, sig);
+        saveMirrorStore(file, this.mirrorStore, this.log);
+      },
+    };
   }
 
   private initCredStore(): void {

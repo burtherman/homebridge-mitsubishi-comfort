@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.8.2
+**Current Version:** 1.8.5
 
 ## Polling and Token Management
 
@@ -303,6 +303,11 @@ Makes one unit (target) follow another (source). **Opt-in via a `mirror` array
 - **Edge-triggered:** the target follows the source *only at the moment the source's
   commanded state changes*. Between source changes the target is free — a manual
   change to the target sticks until the next source change re-syncs it.
+- **An edge missed while the plugin was down still counts (since 1.8.5).** The first
+  observation after a restart seeds the baseline without pushing, so a reboot alone
+  never clobbers a manual target state. But the source's signature is persisted, so
+  if it *differs* from the one recorded at shutdown the source genuinely moved while
+  we weren't running, and the targets are re-synced. See "Mirror state store".
 - **Full re-sync on any source change:** any source change re-applies the source's
   *full* state (mode + setpoint(s) + fan). So a source **temperature** change also
   re-syncs mode/power — a manually-off target is turned back on to match.
@@ -310,6 +315,16 @@ Makes one unit (target) follow another (source). **Opt-in via a `mirror` array
   thermostat (MHK2) / IR remote, the Kumo app, and HomeKit all fire it. The plugin
   already watches the unit's real state via streaming + cloud-poll + local-poll; a
   HomeKit change to the source additionally fires immediately via the setter hook.
+
+**Mirror state store (since 1.8.5):** `src/mirror-store.ts` keeps each source's last
+signature in `mitsubishi-comfort-mirror-state.json` in the Homebridge storage dir
+(same write-then-rename shape as the 1.8.4 credential store). It exists purely so the
+controller can distinguish "restarted, nothing changed" from "restarted, and the source
+moved while we were down" — the latter is a real edge that used to be swallowed by the
+baseline seed. Wired via the optional `MirrorStatePersistence` adapter on the
+`MirrorController` constructor; with no adapter the controller keeps its pre-1.8.5
+seed-only startup behavior verbatim. Cache, not truth: missing or corrupt degrades to
+seed-only and never blocks startup. Holds no secrets.
 
 **Mechanism:**
 - `src/mirror.ts` — `MirrorController`. Subscribes to each *source* accessory's

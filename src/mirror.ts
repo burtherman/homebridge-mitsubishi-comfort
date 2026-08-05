@@ -16,6 +16,12 @@ import type { KumoThermostatAccessory } from './accessory';
  * can't spuriously re-clobber a manually-adjusted target. Between source changes
  * the target is free — a manual change there persists until the next source change.
  *
+ * The first observation after a (re)start seeds the baseline without pushing, so a
+ * reboot doesn't clobber a manual target state. Given a `persist` adapter the
+ * controller can tell that case apart from a source that moved while the plugin was
+ * *down* (signature differs from the one persisted at shutdown), which is a real
+ * missed edge and does get mirrored. See mirror-store.ts for why.
+ *
  * See docs/superpowers/specs/2026-07-22-device-mirroring-design.md.
  */
 
@@ -28,6 +34,15 @@ interface SourceWatch {
   timer: NodeJS.Timeout | null;
 }
 
+/**
+ * Cross-restart memory of each source's last-seen signature. Optional — with no
+ * adapter the controller behaves exactly as it did before (seed-only on startup).
+ */
+export interface MirrorStatePersistence {
+  load(sourceSerial: string): string | null;
+  save(sourceSerial: string, signature: string): void;
+}
+
 export class MirrorController {
   private readonly watches = new Map<string, SourceWatch>();
 
@@ -36,6 +51,7 @@ export class MirrorController {
     pairs: MirrorPair[],
     handlers: KumoThermostatAccessory[],
     private readonly debounceMs: number = DEFAULT_DEBOUNCE_MS,
+    private readonly persist: MirrorStatePersistence | null = null,
   ) {
     const bySerial = new Map(handlers.map(h => [h.getDeviceSerial(), h]));
 
@@ -77,16 +93,26 @@ export class MirrorController {
 
     // First observation after (re)start seeds the baseline without pushing — a
     // restart isn't "someone changed the kitchen", so a manual target state survives.
+    // Unless the persisted signature says the source moved while we were DOWN: that
+    // is a real edge we were not running to observe, so it still gets mirrored.
     if (watch.lastSignature === null) {
       watch.lastSignature = sig;
-      this.log.debug(`[MIRROR] ${sourceSerial}: baseline seeded (${sig})`);
-      return;
+      const prior = this.persist?.load(sourceSerial) ?? null;
+      this.persist?.save(sourceSerial, sig);
+      if (prior === null || prior === sig) {
+        this.log.debug(`[MIRROR] ${sourceSerial}: baseline seeded (${sig})`);
+        return;
+      }
+      this.log.info(
+        `[MIRROR] ${sourceSerial}: changed while the plugin was down (${prior} → ${sig}) — re-syncing targets`);
+    } else {
+      // No change → don't clobber a manual target adjustment.
+      if (sig === watch.lastSignature) {
+        return;
+      }
+      watch.lastSignature = sig;
+      this.persist?.save(sourceSerial, sig);
     }
-    // No change → don't clobber a manual target adjustment.
-    if (sig === watch.lastSignature) {
-      return;
-    }
-    watch.lastSignature = sig;
 
     // Debounce: collapse a mode+setpoint burst (or a fast drag) into one push.
     if (watch.timer) {
