@@ -90,6 +90,9 @@ export class KumoThermostatAccessory {
   // HomeKit change to this unit without waiting for the streaming/local echo).
   private statusListeners: Array<(status: DeviceStatus) => void> = [];
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private loggingService: any = null;
+
   constructor(
     private readonly platform: KumoV3Platform,
     private readonly accessory: PlatformAccessory,
@@ -196,6 +199,13 @@ export class KumoThermostatAccessory {
         this.applyDeviceProfile(profile);
       }
     });
+
+    if (this.platform.FakeGatoHistoryService) {
+      this.loggingService = new this.platform.FakeGatoHistoryService('room', this.accessory, {
+        storage: 'fs',
+        size: 4032,
+      });
+    }
 
   }
 
@@ -895,6 +905,17 @@ export class KumoThermostatAccessory {
           this.platform.Characteristic.On,
           this.isDryActive(status),
         );
+      }
+
+      if (this.loggingService) {
+        const entry: Record<string, number> = {
+          time: Math.round(Date.now() / 1000),
+          temp: status.roomTemp,
+        };
+        if (status.humidity !== null && status.humidity !== undefined) {
+          entry.humidity = status.humidity;
+        }
+        this.loggingService.addEntry(entry);
       }
 
       // Notify mirror listeners — this only runs on an applied update (early

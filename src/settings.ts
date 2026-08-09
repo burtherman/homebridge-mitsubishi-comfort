@@ -37,6 +37,10 @@ export interface KumoConfig {
   // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;
   // a manual change to the target persists until the next source change re-syncs it.
   mirror?: MirrorPair[];
+  // Eve app temperature/humidity history (opt-in). When true, each accessory
+  // exposes a fakegato-history service so the Eve app can display historical
+  // temperature and humidity graphs. Disabled by default.
+  enableHistory?: boolean;
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */

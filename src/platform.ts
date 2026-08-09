@@ -74,6 +74,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private readonly discoveryRetryBaseMs: number = 30000; // first retry after 30s
   private readonly discoveryRetryMaxMs: number = 300000; // cap backoff at 5 minutes
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  public readonly FakeGatoHistoryService: any = null;
+
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
@@ -129,6 +132,16 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     this.kumoAPI.onStreamingHealthChange((isHealthy: boolean) => {
       this.handleStreamingHealthChange(isHealthy);
     });
+
+    if (this.kumoConfig.enableHistory) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        this.FakeGatoHistoryService = require('fakegato-history')(this.api);
+        this.log.info('Eve history logging enabled');
+      } catch (e) {
+        this.log.error('Failed to load fakegato-history — history disabled:', e);
+      }
+    }
 
     this.api.on('didFinishLaunching', () => {
       log.debug('Executed didFinishLaunching callback');

@@ -100,6 +100,12 @@
         "type": "object",
         "description": "Optional manual { \"<deviceSerial>\": \"<ip>\" } map to skip LAN discovery for specific units (edit via the JSON config editor)."
       },
+      "enableHistory": {
+        "title": "Enable Eve History",
+        "type": "boolean",
+        "default": false,
+        "description": "Log temperature and humidity history for the Eve app. Requires the Eve app to view historical graphs."
+      },
       "mirror": {
         "title": "Device Mirroring",
         "type": "array",
@@ -156,7 +162,8 @@
             }
           ]
         },
-        "debug"
+        "debug",
+        "enableHistory"
       ]
     },
     {

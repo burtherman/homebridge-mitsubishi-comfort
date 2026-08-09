@@ -35,6 +35,7 @@
   },
   "homepage": "https://github.com/burtherman/homebridge-mitsubishi-comfort#readme",
   "dependencies": {
+    "fakegato-history": "^0.6.7",
     "node-fetch": "^3.2.0",
     "socket.io-client": "^4.8.1"
   },
