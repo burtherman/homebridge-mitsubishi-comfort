@@ -63,7 +63,7 @@ function makeAccessory() {
 }
 function makeHarness() {
   const log = makeLog();
-  const platform = { Service, Characteristic, log, api: { updatePlatformAccessories() {} }, localClient: null };
+  const platform = { Service, Characteristic, log, api: { updatePlatformAccessories() {} }, config: { temperatureUnit: 'C' }, localClient: null };
   const kumoAPI = { subscribeToDevice() {}, onDeviceProfileUpdate() {}, sendCommand() { return Promise.resolve(true); } };
   const handler = new KumoThermostatAccessory(platform, makeAccessory(), kumoAPI, 30);
   return { handler, log };

@@ -37,6 +37,11 @@ export interface KumoConfig {
   // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;
   // a manual change to the target persists until the next source change re-syncs it.
   mirror?: MirrorPair[];
+  // Temperature display unit. When set to 'F', the plugin rounds Celsius values
+  // from the API to the nearest exact Fahrenheit equivalent before publishing to
+  // HomeKit, eliminating the ±1°F display error caused by the °F→°C→°F
+  // double-conversion round-trip. Default 'F' (US-market units).
+  temperatureUnit?: 'F' | 'C';
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */

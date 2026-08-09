@@ -104,6 +104,7 @@ function makeHarness() {
     Characteristic,
     log: makeLog(),
     api: { updatePlatformAccessories: (a) => updates.push(a) },
+    config: { temperatureUnit: 'C' },
   };
   const kumoAPI = {
     subscribeToDevice() {},

@@ -81,6 +81,16 @@
         "maximum": 60,
         "description": "Fast polling interval when streaming is unhealthy (default: 10 seconds)"
       },
+      "temperatureUnit": {
+        "title": "Temperature Display Unit",
+        "type": "string",
+        "default": "F",
+        "oneOf": [
+          { "title": "Fahrenheit (corrects ±1°F rounding)", "enum": ["F"] },
+          { "title": "Celsius (no correction)", "enum": ["C"] }
+        ],
+        "description": "When set to F (default), temperatures from the API are rounded to the nearest whole Fahrenheit degree before publishing to HomeKit, eliminating the ±1°F display error caused by the Fahrenheit→Celsius→Fahrenheit double-conversion round-trip."
+      },
       "localControl": {
         "title": "Enable Local Control (experimental)",
         "type": "boolean",
@@ -156,6 +166,7 @@
             }
           ]
         },
+        "temperatureUnit",
         "debug"
       ]
     },

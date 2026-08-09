@@ -82,6 +82,7 @@ function makeHarness({ localClient = null } = {}) {
     Characteristic,
     log: makeLog(),
     api: { updatePlatformAccessories() {} },
+    config: { temperatureUnit: 'C' },
     localClient,
   };
   const kumoAPI = {

@@ -16,6 +16,18 @@ export type CommandOrigin =
   | 'mirror';
 
 /**
+ * Round a Celsius value to the nearest exact Fahrenheit-whole-degree equivalent.
+ * Eliminates the ±1°F display error in the Home app caused by the
+ * °F→°C (Kumo API) → °C→°F (Home app) double-conversion: e.g. 70°F stored as
+ * 21.0°C reads back as 69.8°F and may display as 69°F. After correction,
+ * 21.0°C → round(69.8)=70°F → (70−32)×5/9 = 21.111°C, which displays as 70°F.
+ */
+function roundToNearestFahrenheit(celsius: number): number {
+  const f = celsius * 9 / 5 + 32;
+  return (Math.round(f) - 32) * 5 / 9;
+}
+
+/**
  * Collapse power + operationMode into the one label that matters for "is it on,
  * and doing what". power=0 is off whatever the mode field says.
  */
@@ -89,6 +101,7 @@ export class KumoThermostatAccessory {
   // thermostat / Kumo app / any observed change) and from the setters (catches a
   // HomeKit change to this unit without waiting for the streaming/local echo).
   private statusListeners: Array<(status: DeviceStatus) => void> = [];
+  private readonly useFahrenheitCorrection: boolean;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -96,6 +109,7 @@ export class KumoThermostatAccessory {
     private readonly kumoAPI: KumoAPI,
     pollIntervalSeconds?: number,
   ) {
+    this.useFahrenheitCorrection = (platform.config as any)?.temperatureUnit !== 'C';
     this.deviceSerial = this.accessory.context.device.deviceSerial;
     this.siteId = this.accessory.context.device.siteId;
     this.pollIntervalMs = (pollIntervalSeconds || POLL_INTERVAL / 1000) * 1000;
@@ -197,6 +211,11 @@ export class KumoThermostatAccessory {
       }
     });
 
+  }
+
+  /** Apply Fahrenheit round-trip correction if configured (no-op when disabled). */
+  private correctTemp(celsius: number): number {
+    return this.useFahrenheitCorrection ? roundToNearestFahrenheit(celsius) : celsius;
   }
 
   private applyDeviceProfile(profile: DeviceProfile): void {
@@ -839,7 +858,7 @@ export class KumoThermostatAccessory {
       if (status.roomTemp !== undefined && status.roomTemp !== null && !isNaN(status.roomTemp)) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.CurrentTemperature,
-          status.roomTemp,
+          this.correctTemp(status.roomTemp),
         );
       }
 
@@ -851,7 +870,7 @@ export class KumoThermostatAccessory {
 
         this.service.updateCharacteristic(
           this.platform.Characteristic.TargetTemperature,
-          targetTemp,
+          this.correctTemp(targetTemp),
         );
       }
 
@@ -863,13 +882,13 @@ export class KumoThermostatAccessory {
       if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.HeatingThresholdTemperature,
-          status.spHeat,
+          this.correctTemp(status.spHeat),
         );
       }
       if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
         this.service.updateCharacteristic(
           this.platform.Characteristic.CoolingThresholdTemperature,
-          status.spCool,
+          this.correctTemp(status.spCool),
         );
       }
 
@@ -1164,7 +1183,7 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.debug(`HomeKit get current temp for ${this.accessory.displayName}: ${temp}°C`);
-    return temp;
+    return this.correctTemp(temp);
   }
 
   async getTargetTemperature(): Promise<CharacteristicValue> {
@@ -1184,7 +1203,7 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.debug(`HomeKit get target temp for ${this.accessory.displayName}: ${temp}°C`);
-    return temp;
+    return this.correctTemp(temp);
   }
 
   async setTargetTemperature(value: CharacteristicValue) {
@@ -1315,7 +1334,7 @@ export class KumoThermostatAccessory {
     if (v === undefined || v === null || isNaN(v)) {
       return fallback;
     }
-    return v;
+    return this.correctTemp(v);
   }
 
   async setHeatingThresholdTemperature(value: CharacteristicValue) {
