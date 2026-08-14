@@ -604,6 +604,16 @@ export class KumoThermostatAccessory {
     return this.deviceSerial;
   }
 
+  /**
+   * When this accessory last APPLIED a real update (any source), for the platform's
+   * resilience watchdog. 0 means nothing has been applied yet. Advances only past the
+   * source/monotonicity guards, so a dropped (local-authoritative / stale) update does
+   * not count as fresh data.
+   */
+  public getLastUpdateTs(): number {
+    return this.lastUpdateTimestamp;
+  }
+
   // Called by platform when new zone data is available
   public updateFromZone(zone: Zone) {
     const updateTimestamp = Date.now();

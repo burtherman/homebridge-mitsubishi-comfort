@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import fetch from 'node-fetch';
+import fetch, { RequestInit } from 'node-fetch';
 import { Logger } from 'homebridge';
 import { Commands, DeviceStatus } from './settings';
 
@@ -149,11 +149,37 @@ export function mapLocalStatus(local: Record<string, unknown>): Partial<DeviceSt
 export class LocalKumoClient {
   private readonly creds = new Map<string, LocalDeviceCreds>();
   private readonly chains = new Map<string, Promise<unknown>>();
+  /** Serials currently in a failed-read state — drives transition-only logging. */
+  private readonly failingSerials = new Set<string>();
 
   constructor(
     private readonly log: Logger,
     private readonly timeoutMs: number = 6000,
+    private readonly debugMode: boolean = false,
   ) {}
+
+  /**
+   * Log a local-read failure at a VISIBLE level, but only on the transition into
+   * failure (and once on recovery), so a chronically unreachable unit can't spam a
+   * line every poll cycle. `debugMode` (the plugin's own `debug` flag) is visible in
+   * the normal log; plain `log.debug` is not unless Homebridge runs with `-D`.
+   */
+  private noteLocalFail(serial: string, ip: string, reason: string): void {
+    if (this.failingSerials.has(serial)) {
+      this.log.debug(`[LOCAL] ${serial} @ ${ip}: still failing — ${reason}`);
+      return;
+    }
+    this.failingSerials.add(serial);
+    if (this.debugMode) {
+      this.log.info(`[LOCAL] ${serial} @ ${ip}: local read failing — ${reason}`);
+    }
+  }
+
+  private noteLocalOk(serial: string): void {
+    if (this.failingSerials.delete(serial) && this.debugMode) {
+      this.log.info(`[LOCAL] ${serial}: local reads recovered`);
+    }
+  }
 
   setCreds(serial: string, creds: LocalDeviceCreds): void {
     this.creds.set(serial, creds);
@@ -193,38 +219,58 @@ export class LocalKumoClient {
 
     return this.withLock(serial, async () => {
       const token = computeLocalToken(creds.password, creds.cryptoSerial, body);
+      // Bound the WHOLE request — headers AND the body read — with an AbortController.
+      // node-fetch resolves as soon as headers arrive, so a unit that returns headers
+      // then stalls the body would hang `res.json()` forever (the body stream has no
+      // timeout of its own), permanently wedging this serial's lock chain and — since
+      // the poll loop awaits each getStatus sequentially — the whole local poll loop.
+      // Aborting tears the body stream down, rejects the read, and cancels the socket
+      // (so a dead unit can't leak connections). This replaced a `Promise.race` that
+      // only covered the headers. See
+      // docs/superpowers/specs/2026-08-14-streaming-local-resilience-design.md.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
-        const fetchPromise = fetch(`http://${creds.ip}/api?m=${token}`, {
+        const res = await fetch(`http://${creds.ip}/api?m=${token}`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*',
           },
           body,
+          // Node's global AbortSignal vs node-fetch's own signal type — same object
+          // at runtime, disjoint lib typings in this tsconfig (see kumo-api.ts).
+          signal: controller.signal as unknown as RequestInit['signal'],
         });
-        // node-fetch v3 dropped the `timeout` option, so race the request against a
-        // timer — an unreachable unit must not stall the poll. The losing fetch is
-        // left to settle in the background; swallow its eventual rejection.
-        fetchPromise.catch(() => undefined);
-        const res = await Promise.race([
-          fetchPromise,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), this.timeoutMs)),
-        ]);
-        if (!res) {
-          this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: timed out after ${this.timeoutMs}ms`);
+        const json = await res.json().catch(() => null) as Record<string, unknown> | null;
+        // An abort fired mid-body surfaces as a rejected res.json() (swallowed to null
+        // above), not as a throw — so check the signal explicitly to label it a timeout
+        // rather than a malformed reply.
+        if (controller.signal.aborted) {
+          this.noteLocalFail(serial, creds.ip, `timed out after ${this.timeoutMs}ms`);
           return null;
         }
-        const json = await res.json().catch(() => null) as Record<string, unknown> | null;
         if (json && json.r && typeof json.r === 'object') {
+          this.noteLocalOk(serial);
           return json.r as Record<string, unknown>;
         }
-        if (json && json._api_error) {
-          this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: api error ${json._api_error}`);
-        }
+        this.noteLocalFail(
+          serial,
+          creds.ip,
+          json && json._api_error ? `api error ${json._api_error}` : 'malformed reply',
+        );
         return null;
       } catch (err) {
-        this.log.debug(`[LOCAL] ${serial} @ ${creds.ip}: request failed (${(err as Error).message})`);
+        const e = err as Error;
+        const timedOut = controller.signal.aborted || e.name === 'AbortError';
+        this.noteLocalFail(
+          serial,
+          creds.ip,
+          timedOut ? `timed out after ${this.timeoutMs}ms` : `request failed (${e.message})`,
+        );
         return null;
+      } finally {
+        clearTimeout(timer);
       }
     });
   }
@@ -283,21 +329,18 @@ type ProbeResult = 'match' | 'kumo' | null;
  *  - null    → unreachable / not a Kumo adapter
  */
 async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
+  // Same AbortController bounding as LocalKumoClient.request — a stalled body read
+  // during a subnet sweep must not hang a discovery worker indefinitely.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const token = computeLocalToken(creds.password, creds.cryptoSerial, STATUS_READ_BODY);
-    const fetchPromise = fetch(`http://${ip}/api?m=${token}`, {
+    const res = await fetch(`http://${ip}/api?m=${token}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
       body: STATUS_READ_BODY,
+      signal: controller.signal as unknown as RequestInit['signal'],
     });
-    fetchPromise.catch(() => undefined);
-    const res = await Promise.race([
-      fetchPromise,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-    ]);
-    if (!res) {
-      return null;
-    }
     const json = await res.json().catch(() => null) as Record<string, unknown> | null;
     if (json && json.r && typeof json.r === 'object' && (json.r as Record<string, unknown>).indoorUnit) {
       return 'match';
@@ -308,6 +351,8 @@ async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: numbe
     return null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -79,6 +79,24 @@ export class KumoAPI {
   private isStreamingHealthy: boolean = false;
   private isReconnecting: boolean = false; // Suppresses health notifications during planned reconnects
 
+  // Active streaming liveness probe. A socket can be TCP-connected yet have a dead
+  // server-side device_update subscription (a "zombie" — observed 2026-08-13). The
+  // socket-only health check can't see that, so we periodically FORCE a device_update
+  // and confirm one lands; if not, reconnect. Constants chosen so a healthy-but-quiet
+  // stream is never falsely reconnected (the probe forces traffic) and a true zombie
+  // is caught in ~6 min. See
+  // docs/superpowers/specs/2026-08-14-streaming-local-resilience-design.md.
+  private lastDeviceUpdateInboundTs: number = 0;
+  private livenessProbeTimer: NodeJS.Timeout | null = null;
+  private probeMissCount: number = 0;
+  private probeRotationIdx: number = 0;
+  private lastProbeReconnectTs: number = 0;
+  private forceStatusOnNextConnect: boolean = false;
+  private static readonly PROBE_INTERVAL_MS = 180000; // force a probe every 3 min
+  private static readonly PROBE_TIMEOUT_MS = 20000; // expect a device_update within 20s
+  private static readonly PROBE_MAX_MISSES = 2; // ~6 min to declare the stream dead
+  private static readonly PROBE_RECONNECT_COOLDOWN_MS = 300000; // ≥5 min between probe reconnects
+
   // Rate limiting and retry tracking
   private refreshRetryCount: number = 0;
   private lastRefreshAttempt: number = 0;
@@ -639,6 +657,10 @@ export class KumoAPI {
       this.socket.on('connect', () => {
         // Use debug level for routine reconnects, info for initial connection
         const isRoutineReconnect = this.isReconnecting;
+        // A watchdog/probe-forced reconnect is flagged "routine" (to suppress health
+        // flap logging) but must still re-request status so state reseeds at once.
+        const forceStatus = this.forceStatusOnNextConnect;
+        this.forceStatusOnNextConnect = false;
 
         if (isRoutineReconnect) {
           this.log.debug(`Streaming reconnected (ID: ${this.socket?.id})`);
@@ -668,8 +690,10 @@ export class KumoAPI {
           this.socket?.emit('subscribe', '', userId);
         }
 
-        // On initial connection, request device profiles and status
-        if (!isRoutineReconnect) {
+        // On initial connection (or a watchdog-forced reconnect) request device
+        // profiles and status so state reseeds immediately instead of waiting for the
+        // next real change.
+        if (!isRoutineReconnect || forceStatus) {
           for (const deviceSerial of deviceSerials) {
             if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
               continue;
@@ -700,6 +724,10 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
+
+        // Streaming liveness signal — key on device_update SPECIFICALLY. profile_update
+        // keeps flowing during a zombie, so counting "any socket data" would be fooled.
+        this.lastDeviceUpdateInboundTs = Date.now();
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -1060,6 +1088,7 @@ export class KumoAPI {
       this.checkStreamingHealth();
     }, this.streamingHealthCheckInterval);
 
+    this.startLivenessProbe();
     this.log.debug('Started streaming health checks');
   }
 
@@ -1071,6 +1100,83 @@ export class KumoAPI {
       clearInterval(this.healthCheckTimer);
       this.healthCheckTimer = null;
     }
+    this.stopLivenessProbe();
+  }
+
+  private startLivenessProbe(): void {
+    if (this.livenessProbeTimer) {
+      clearInterval(this.livenessProbeTimer);
+    }
+    this.probeMissCount = 0;
+    this.livenessProbeTimer = setInterval(() => this.runLivenessProbe(), KumoAPI.PROBE_INTERVAL_MS);
+    // Background timer — must not keep the process alive on its own.
+    this.livenessProbeTimer.unref();
+  }
+
+  private stopLivenessProbe(): void {
+    if (this.livenessProbeTimer) {
+      clearInterval(this.livenessProbeTimer);
+      this.livenessProbeTimer = null;
+    }
+    this.probeMissCount = 0;
+  }
+
+  /**
+   * Force a device_update and confirm one lands — the only reliable way to tell a
+   * healthy-but-quiet stream from a zombie (socket up, subscription dead). Probing
+   * `iuStatus`→`device_update` exercises the exact pathway that dies, so it also
+   * catches a zombie that would still answer `device_status_v2`.
+   */
+  private runLivenessProbe(): void {
+    // Don't probe a socket that's down or mid-planned-reconnect.
+    if (!this.isStreamingConnected() || this.isReconnecting) {
+      return;
+    }
+    const serials = Array.from(this.deviceUpdateCallbacks.keys());
+    if (serials.length === 0) {
+      return;
+    }
+    const serial = serials[this.probeRotationIdx % serials.length];
+    this.probeRotationIdx++;
+    const sentAt = Date.now();
+    this.socket?.emit('force_adapter_request', serial, 'iuStatus');
+
+    const evalTimer = setTimeout(() => {
+      // A disconnect/reconnect in the meantime is handled by their own paths.
+      if (!this.isStreamingConnected() || this.isReconnecting) {
+        return;
+      }
+      // Passed if ANY device_update arrived after the probe was sent (real traffic
+      // counts too, so one chronically-silent device can't force a reconnect).
+      if (this.lastDeviceUpdateInboundTs >= sentAt) {
+        if (this.probeMissCount > 0 && this.debugMode) {
+          this.log.info('[STREAM] liveness probe recovered');
+        }
+        this.probeMissCount = 0;
+        return;
+      }
+      this.probeMissCount++;
+      if (this.debugMode) {
+        this.log.info(
+          `[STREAM] liveness probe missed (${this.probeMissCount}/${KumoAPI.PROBE_MAX_MISSES}) — ` +
+          `no device_update in ${KumoAPI.PROBE_TIMEOUT_MS}ms`,
+        );
+      }
+      if (this.probeMissCount < KumoAPI.PROBE_MAX_MISSES) {
+        return;
+      }
+      if ((Date.now() - this.lastProbeReconnectTs) < KumoAPI.PROBE_RECONNECT_COOLDOWN_MS) {
+        return; // within cooldown — don't storm the reconnect
+      }
+      this.probeMissCount = 0;
+      this.lastProbeReconnectTs = Date.now();
+      this.log.warn('⚠ STREAMING ZOMBIE detected (socket up, no device_update) — forcing reconnect');
+      this.forceStatusOnNextConnect = true;
+      this.reconnectStreaming().catch((e) =>
+        this.log.warn(`Zombie reconnect failed: ${(e as Error).message}`),
+      );
+    }, KumoAPI.PROBE_TIMEOUT_MS);
+    evalTimer.unref();
   }
 
   destroy(): void {

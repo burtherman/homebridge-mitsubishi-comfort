@@ -41,6 +41,16 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private isStreamingHealthy: boolean = false;
   private isDegradedMode: boolean = false;
 
+  // Resilience watchdog: a coarse backstop that catches a wedged local poll loop or a
+  // total data stall (both streaming + local blind) even when the specific fixes miss
+  // the cause. See docs/superpowers/specs/2026-08-14-streaming-local-resilience-design.md.
+  private lastLocalPollSuccessTs: number = 0;
+  private resilienceWatchdogTimer: NodeJS.Timeout | null = null;
+  private lastWatchdogRecoveryTs: number = 0;
+  private static readonly WATCHDOG_INTERVAL_MS = 60000;
+  private static readonly GLOBAL_STALE_MS = 600000; // 10 min with zero applied updates → full recovery
+  private static readonly WATCHDOG_COOLDOWN_MS = 300000;
+
   // Local LAN control (opt-in). The client is shared with accessories for
   // local-first command routing; the platform drives discovery + status polling.
   public localClient: LocalKumoClient | null = null;
@@ -155,6 +165,12 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (this.localPollTimer) {
       clearInterval(this.localPollTimer);
       this.localPollTimer = null;
+    }
+
+    // Stop the resilience watchdog
+    if (this.resilienceWatchdogTimer) {
+      clearInterval(this.resilienceWatchdogTimer);
+      this.resilienceWatchdogTimer = null;
     }
 
     // Stop the background local-credential retry
@@ -412,6 +428,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         this.log.info('Polling disabled - will activate only if streaming fails');
       }
 
+      // Coarse resilience backstop — runs regardless of streaming/local mode.
+      this.startResilienceWatchdog();
+
       // Device mirroring (opt-in). Construct once — discovery can retry, so guard
       // on an existing controller to avoid double-registering source listeners.
       if (!this.mirror && this.kumoConfig.mirror && this.kumoConfig.mirror.length > 0) {
@@ -436,7 +455,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    */
   private async initLocalControl(serials: string[]): Promise<void> {
     this.log.info('Local control enabled — gathering credentials...');
-    this.localClient = new LocalKumoClient(this.log);
+    this.localClient = new LocalKumoClient(this.log, undefined, this.kumoConfig.debug || false);
     this.localSerials = serials;
     this.initCredStore();
 
@@ -798,6 +817,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         try {
           const status = await this.localClient.getStatus(serial);
           if (status) {
+            this.lastLocalPollSuccessTs = Date.now();
             handler.updateFromLocal(status);
           }
         } catch (error) {
@@ -808,6 +828,67 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     poll();
     this.localPollTimer = setInterval(poll, interval);
+  }
+
+  private startResilienceWatchdog(): void {
+    if (this.resilienceWatchdogTimer) {
+      return;
+    }
+    this.resilienceWatchdogTimer = setInterval(
+      () => this.checkResilience(),
+      KumoV3Platform.WATCHDOG_INTERVAL_MS,
+    );
+    // Don't let this background timer keep the process alive on its own (clean
+    // shutdown / test exit); Homebridge's own event loop keeps it firing in production.
+    this.resilienceWatchdogTimer.unref();
+  }
+
+  /**
+   * Coarse backstop. Two independent checks:
+   *  1. Local poll loop wedged — no successful local read in ~3× the poll interval,
+   *     while local units exist. Restart the loop. (Redundant with the AbortController
+   *     fix in local-api, kept as defense-in-depth for unknown wedges.)
+   *  2. Total data stall — no accessory has applied ANY update from ANY source in
+   *     GLOBAL_STALE_MS. Force a streaming reconnect + local-loop restart. This is the
+   *     single check that would have auto-recovered the 2026-08-13 incident.
+   */
+  private checkResilience(): void {
+    const now = Date.now();
+
+    // 1. Wedged local poll loop.
+    if (this.localClient && this.localPollTimer) {
+      const interval = (this.kumoConfig.localPollInterval || 15) * 1000;
+      const wedgeMs = Math.max(45000, interval * 3);
+      const anyLocal = this.accessoryHandlers.some(h => this.localClient!.hasLocal(h.getDeviceSerial()));
+      if (anyLocal && this.lastLocalPollSuccessTs > 0 && (now - this.lastLocalPollSuccessTs) > wedgeMs) {
+        this.log.warn(
+          `⚠ Local poll stalled ${Math.round((now - this.lastLocalPollSuccessTs) / 1000)}s — restarting local polling`,
+        );
+        clearInterval(this.localPollTimer);
+        this.localPollTimer = null;
+        this.startLocalPolling();
+      }
+    }
+
+    // 2. Total data stall (both streaming and local blind).
+    const lastData = this.accessoryHandlers.reduce((max, h) => Math.max(max, h.getLastUpdateTs()), 0);
+    if (
+      lastData > 0 &&
+      (now - lastData) > KumoV3Platform.GLOBAL_STALE_MS &&
+      (now - this.lastWatchdogRecoveryTs) > KumoV3Platform.WATCHDOG_COOLDOWN_MS
+    ) {
+      this.lastWatchdogRecoveryTs = now;
+      this.log.warn(
+        `⚠ No device data from any source for ${Math.round((now - lastData) / 1000)}s — forcing full recovery`,
+      );
+      this.kumoAPI.reconnectStreaming().catch(e =>
+        this.log.warn(`Watchdog reconnect failed: ${(e as Error).message}`));
+      if (this.localClient && this.localPollTimer) {
+        clearInterval(this.localPollTimer);
+        this.localPollTimer = null;
+        this.startLocalPolling();
+      }
+    }
   }
 
   private startSitePoller(siteId: string) {

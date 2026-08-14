@@ -9,13 +9,17 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const http = require('node:http');
 const {
   computeLocalToken,
   buildLocalCommandBody,
   mapLocalStatus,
   enumerateSubnet,
   STATUS_READ_BODY,
+  LocalKumoClient,
 } = require('../dist/local-api.js');
+
+const NOOP_LOG = { info() {}, warn() {}, error() {}, debug() {} };
 
 // 10-byte hex cryptoSerial (>= 9 bytes) + base64 password.
 const CS = '0123456789abcdef0123';
@@ -121,4 +125,39 @@ test('enumerateSubnet returns the /24 minus the host', () => {
 
 test('enumerateSubnet returns [] for a non-IPv4 string', () => {
   assert.deepStrictEqual(enumerateSubnet('not-an-ip'), []);
+});
+
+// ---- request bounding (the 2026-08-13 local-poll wedge) -------------------
+// A unit that sends response headers then stalls the body used to hang res.json()
+// forever, permanently wedging the per-serial lock chain (and, since the poll loop
+// awaits each getStatus sequentially, the whole local poll loop). The AbortController
+// must bound the WHOLE request so a stalled unit yields null at ~timeout and the chain
+// keeps advancing.
+
+test('getStatus settles at the timeout when a unit stalls its body (no wedge)', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.write('{"r":{"indoorUnit":'); // headers + partial body, response never ends
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const client = new LocalKumoClient(NOOP_LOG, 500); // 500ms per-request timeout
+  client.setCreds('SERIAL', { ip: `127.0.0.1:${port}`, password: PW, cryptoSerial: CS });
+
+  try {
+    const start = Date.now();
+    const first = await client.getStatus('SERIAL');
+    const firstMs = Date.now() - start;
+    assert.strictEqual(first, null, 'a stalled unit yields null, not data');
+    assert.ok(firstMs >= 400 && firstMs < 1500, `settled at ~timeout, got ${firstMs}ms`);
+
+    // The lock chain must NOT be permanently wedged — a subsequent call also settles.
+    const start2 = Date.now();
+    const second = await client.getStatus('SERIAL');
+    const secondMs = Date.now() - start2;
+    assert.strictEqual(second, null);
+    assert.ok(secondMs >= 400 && secondMs < 1500, `second call also settled, got ${secondMs}ms`);
+  } finally {
+    server.close();
+  }
 });
