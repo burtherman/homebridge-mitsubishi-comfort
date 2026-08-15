@@ -1,5 +1,15 @@
 # Streaming + Local-Poll Resilience — Design & Pressure Test
 
+> **UPDATE 2026-08-14 (post-deploy):** Fix #1 and Fix #3 shipped and hold. The **active
+> liveness probe (§3a) was REMOVED** — it false-fired in production: on these slow adapters
+> `force_adapter_request(iuStatus)` does not reliably return a `device_update` within the
+> probe window, so quiet stretches tripped false "zombie" reconnects. The pressure-test claim
+> that "the probe forces a device_update even when nothing changed" was wrong for this
+> hardware. **The platform watchdog (§3b) is retained** and is the sole streaming/stall
+> safety net — it keys on applied-data freshness (which local polling keeps fresh) so it does
+> not false-fire, and still covers the real 2026-08-13 both-eyes-dead scenario. Do not
+> reintroduce an active probe here.
+
 **Date:** 2026-08-14
 **Status:** Draft for review (no code changed)
 **Trigger:** 2026-08-13 ~22:59 → 2026-08-14 10:24 the plugin silently froze on stale
