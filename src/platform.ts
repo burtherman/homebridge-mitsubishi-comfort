@@ -64,6 +64,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // Wi-Fi adapter MAC per serial (from the cloud /status), cached so the MAC→IP
   // discovery fast-path doesn't re-hit the cloud on every retry pass.
   private deviceMacs: Map<string, string> = new Map();
+  // Serials whose wireless sensor has warned low-battery, so we log it once per drop.
+  private lowBatteryWarned: Set<string> = new Set();
   private localCredRetryTimer: NodeJS.Timeout | null = null;
   private localCredRetryRunning: boolean = false;
   // serial -> candidate password already handed to discovery (from the disk
@@ -912,6 +914,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           const status = await this.localClient.getStatus(serial);
           if (status) {
             this.lastLocalPollSuccessTs = Date.now();
+            // Humidity isn't in the main status read — pull it from the unit's
+            // sensor/MHK2 (cheap + cached; null for units with neither, which then
+            // keep whatever the cloud reported).
+            const humidity = await this.localClient.getHumidity(serial);
+            if (humidity) {
+              status.humidity = humidity.humidity;
+              this.noteSensorBattery(serial, humidity.battery);
+            }
             handler.updateFromLocal(status);
           }
         } catch (error) {
@@ -922,6 +932,20 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     poll();
     this.localPollTimer = setInterval(poll, interval);
+  }
+
+  /** Warn once when a wireless sensor's battery drops low; note once when it recovers. */
+  private noteSensorBattery(serial: string, battery?: number): void {
+    if (typeof battery !== 'number') {
+      return;
+    }
+    const LOW_BATTERY_PCT = 15;
+    if (battery <= LOW_BATTERY_PCT && !this.lowBatteryWarned.has(serial)) {
+      this.lowBatteryWarned.add(serial);
+      this.log.warn(`[LOCAL] ${serial}: wireless sensor battery low (${battery}%)`);
+    } else if (battery > LOW_BATTERY_PCT && this.lowBatteryWarned.delete(serial)) {
+      this.log.info(`[LOCAL] ${serial}: wireless sensor battery recovered (${battery}%)`);
+    }
   }
 
   private startResilienceWatchdog(): void {

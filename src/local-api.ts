@@ -146,11 +146,33 @@ export function mapLocalStatus(local: Record<string, unknown>): Partial<DeviceSt
  * the HA library dropped the lock, which we don't repeat) and uses a forgiving
  * timeout (the reference's 1.2s connect timeout flaps on busy WiFi).
  */
+/** A locally-read humidity value plus wireless-sensor health (undefined for MHK2). */
+export interface LocalHumidity {
+  humidity: number;
+  battery?: number;
+  rssi?: number;
+}
+
+/** Where a unit's humidity comes from, cached after the first probe. */
+type LocalHumiditySource =
+  | { kind: 'sensor'; slot: number }
+  | { kind: 'mhk2' }
+  | { kind: 'none' };
+
+/** Max external sensor slots probed on a unit (matches the reference library). */
+const MAX_SENSOR_SLOTS = 4;
+
 export class LocalKumoClient {
   private readonly creds = new Map<string, LocalDeviceCreds>();
   private readonly chains = new Map<string, Promise<unknown>>();
   /** Serials currently in a failed-read state — drives transition-only logging. */
   private readonly failingSerials = new Set<string>();
+  /**
+   * Cached humidity source per serial so steady-state polling costs one request
+   * (units with a sensor/MHK2) or zero (units with neither). Re-discovered on
+   * restart, or when a latched source stops answering.
+   */
+  private readonly humiditySource = new Map<string, LocalHumiditySource>();
 
   constructor(
     private readonly log: Logger,
@@ -211,11 +233,15 @@ export class LocalKumoClient {
    * (timeout, network error, auth error, malformed reply). Null means "no data" —
    * never interpret it as a device state.
    */
-  async request(serial: string, body: Buffer): Promise<Record<string, unknown> | null> {
+  async request(serial: string, body: Buffer, opts: { quiet?: boolean } = {}): Promise<Record<string, unknown> | null> {
     const creds = this.creds.get(serial);
     if (!creds) {
       return null;
     }
+    // `quiet` suppresses the fail/recover note logging + failing-serial tracking —
+    // used by the secondary humidity probes so they never masquerade as a status-read
+    // failure (a unit with no MHK2/sensor legitimately returns empty data).
+    const note = !opts.quiet;
 
     return this.withLock(serial, async () => {
       const token = computeLocalToken(creds.password, creds.cryptoSerial, body);
@@ -247,27 +273,35 @@ export class LocalKumoClient {
         // above), not as a throw — so check the signal explicitly to label it a timeout
         // rather than a malformed reply.
         if (controller.signal.aborted) {
-          this.noteLocalFail(serial, creds.ip, `timed out after ${this.timeoutMs}ms`);
+          if (note) {
+            this.noteLocalFail(serial, creds.ip, `timed out after ${this.timeoutMs}ms`);
+          }
           return null;
         }
         if (json && json.r && typeof json.r === 'object') {
-          this.noteLocalOk(serial);
+          if (note) {
+            this.noteLocalOk(serial);
+          }
           return json.r as Record<string, unknown>;
         }
-        this.noteLocalFail(
-          serial,
-          creds.ip,
-          json && json._api_error ? `api error ${json._api_error}` : 'malformed reply',
-        );
+        if (note) {
+          this.noteLocalFail(
+            serial,
+            creds.ip,
+            json && json._api_error ? `api error ${json._api_error}` : 'malformed reply',
+          );
+        }
         return null;
       } catch (err) {
         const e = err as Error;
         const timedOut = controller.signal.aborted || e.name === 'AbortError';
-        this.noteLocalFail(
-          serial,
-          creds.ip,
-          timedOut ? `timed out after ${this.timeoutMs}ms` : `request failed (${e.message})`,
-        );
+        if (note) {
+          this.noteLocalFail(
+            serial,
+            creds.ip,
+            timedOut ? `timed out after ${this.timeoutMs}ms` : `request failed (${e.message})`,
+          );
+        }
         return null;
       } finally {
         clearTimeout(timer);
@@ -284,6 +318,83 @@ export class LocalKumoClient {
       return null;
     }
     return mapLocalStatus(status);
+  }
+
+  /**
+   * Read a unit's humidity over the LAN — the one field the main status read omits.
+   * Two sources: an external wireless sensor (`{"c":{"sensors":{"N":{}}}}`, slots 0–3,
+   * first slot reporting humidity wins) and, as a fallback, an MHK2 wall control
+   * (`{"c":{"mhk2":{"status":{}}}}` → `indoorHumid`). The source is discovered once and
+   * cached, so a unit with a sensor costs one request/poll and a unit with neither
+   * costs none. Returns null when the unit has no local humidity source (→ the caller
+   * keeps whatever the cloud/streaming last reported). All probes run `quiet` so they
+   * never register as a status-read failure.
+   */
+  async getHumidity(serial: string): Promise<LocalHumidity | null> {
+    const cached = this.humiditySource.get(serial);
+    if (cached?.kind === 'none') {
+      return null;
+    }
+    if (cached?.kind === 'sensor') {
+      const s = await this.readSensorSlot(serial, cached.slot);
+      if (s && typeof s.humidity === 'number') {
+        return { humidity: s.humidity, battery: s.battery, rssi: s.rssi };
+      }
+      this.humiditySource.delete(serial); // source went away — re-discover next poll
+      return null;
+    }
+    if (cached?.kind === 'mhk2') {
+      const h = await this.readMhk2Humidity(serial);
+      if (h !== null) {
+        return { humidity: h };
+      }
+      this.humiditySource.delete(serial);
+      return null;
+    }
+
+    // First probe: find the source and cache it.
+    for (let slot = 0; slot < MAX_SENSOR_SLOTS; slot++) {
+      const s = await this.readSensorSlot(serial, slot);
+      if (!s || !s.uuid) {
+        break; // no more paired sensors on this unit
+      }
+      if (typeof s.humidity === 'number') {
+        this.humiditySource.set(serial, { kind: 'sensor', slot });
+        return { humidity: s.humidity, battery: s.battery, rssi: s.rssi };
+      }
+    }
+    const h = await this.readMhk2Humidity(serial);
+    if (h !== null) {
+      this.humiditySource.set(serial, { kind: 'mhk2' });
+      return { humidity: h };
+    }
+    this.humiditySource.set(serial, { kind: 'none' });
+    return null;
+  }
+
+  private async readSensorSlot(
+    serial: string,
+    slot: number,
+  ): Promise<{ uuid: string | null; humidity?: number; battery?: number; rssi?: number } | null> {
+    const r = await this.request(serial, Buffer.from(`{"c":{"sensors":{"${slot}":{}}}}`, 'utf8'), { quiet: true });
+    const sensors = r?.sensors as Record<string, Record<string, unknown>> | undefined;
+    const s = sensors?.[String(slot)];
+    if (!s || typeof s !== 'object') {
+      return null;
+    }
+    return {
+      uuid: typeof s.uuid === 'string' ? s.uuid : null,
+      humidity: typeof s.humidity === 'number' ? s.humidity : undefined,
+      battery: typeof s.battery === 'number' ? s.battery : undefined,
+      rssi: typeof s.rssi === 'number' ? s.rssi : undefined,
+    };
+  }
+
+  private async readMhk2Humidity(serial: string): Promise<number | null> {
+    const r = await this.request(serial, Buffer.from('{"c":{"mhk2":{"status":{}}}}', 'utf8'), { quiet: true });
+    const status = (r?.mhk2 as Record<string, unknown> | null)?.status as Record<string, unknown> | undefined;
+    const h = status?.indoorHumid;
+    return typeof h === 'number' ? h : null;
   }
 
   /** Send a control command locally. Returns true iff the unit acknowledged with `r`. */

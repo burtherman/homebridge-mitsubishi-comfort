@@ -621,9 +621,10 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Called by the platform's local poller with a locally-read status.
-   * The local API has no humidity (it lives in a separate sensors/MHK2 query),
-   * so we preserve the last humidity from streaming rather than wiping it.
+   * Called by the platform's local poller with a locally-read status. Humidity is
+   * read separately (sensor/MHK2) by the poller and stamped onto `status.humidity`;
+   * when a unit has no local humidity source it's absent and we keep whatever
+   * streaming/cloud last reported rather than wiping it.
    */
   public updateFromLocal(status: Partial<DeviceStatus>) {
     if (status.roomTemp === undefined || status.roomTemp === null) {
@@ -639,7 +640,7 @@ export class KumoThermostatAccessory {
         spHeat: status.spHeat!,
         spCool: status.spCool!,
         spAuto: status.spAuto ?? null,
-        humidity: this.currentStatus?.humidity ?? null, // local has none — keep streaming's
+        humidity: status.humidity ?? this.currentStatus?.humidity ?? null, // local sensor/MHK2 if present, else keep cloud's
         power: status.power!,
         operationMode: status.operationMode!,
         previousOperationMode: status.operationMode!,
@@ -647,7 +648,7 @@ export class KumoThermostatAccessory {
         airDirection: status.airDirection || 'auto',
         connected: true,
         isSimulator: false,
-        hasSensor: this.currentStatus?.humidity !== null && this.currentStatus?.humidity !== undefined,
+        hasSensor: (status.humidity ?? this.currentStatus?.humidity) != null,
         hasMhk2: false,
         scheduleOwner: 'adapter',
         scheduleHoldEndTime: 0,
