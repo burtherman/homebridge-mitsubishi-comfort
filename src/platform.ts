@@ -720,7 +720,34 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
     const candidates = enumerateSubnet(hostIp);
     this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
-    this.admitResolved(await discoverDeviceIps(this.log, candidates, toDiscover), toDiscover);
+    this.admitResolved(await discoverDeviceIps(this.log, candidates, toDiscover, { warnUnfound: false }), toDiscover);
+    this.reportUnresolved(toDiscover);
+  }
+
+  /**
+   * Log an accurate reason for each device that stayed on cloud control. The old
+   * "not found on the LAN" wording was misleading: a unit can be plainly ON the LAN
+   * (its MAC is in the ARP cache) yet fail to authenticate because its stored local
+   * credential is stale — a re-pair fixes that, whereas "not found" points at a
+   * network problem that isn't there. Distinguish the two from the MAC→ARP evidence.
+   */
+  private reportUnresolved(pending: Map<string, SerialCreds>): void {
+    if (pending.size === 0) {
+      return;
+    }
+    const macToIp = this.readArpTable();
+    for (const serial of pending.keys()) {
+      const mac = this.deviceMacs.get(serial);
+      const ip = mac ? macToIp.get(mac.toLowerCase()) : undefined;
+      if (ip) {
+        this.log.warn(
+          `[LOCAL] ${serial} is on the LAN at ${ip} but its stored local credential didn't authenticate — ` +
+          'using cloud (re-pair the unit in the app to refresh its local key)',
+        );
+      } else {
+        this.log.warn(`[LOCAL] ${serial} could not be reached or authenticated locally — using cloud`);
+      }
+    }
   }
 
   /**
