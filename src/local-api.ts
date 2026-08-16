@@ -165,8 +165,14 @@ const MAX_SENSOR_SLOTS = 4;
 export class LocalKumoClient {
   private readonly creds = new Map<string, LocalDeviceCreds>();
   private readonly chains = new Map<string, Promise<unknown>>();
-  /** Serials currently in a failed-read state — drives transition-only logging. */
-  private readonly failingSerials = new Set<string>();
+  /**
+   * Consecutive failed-read count per serial. A read is surfaced as a VISIBLE failure
+   * only once it PERSISTS — a `device_authentication_error` (and the like) flaps for a
+   * single poll and self-recovers on the next, so those stay at debug and don't spam
+   * the log; a genuinely offline unit fails repeatedly and does surface.
+   */
+  private readonly failCounts = new Map<string, number>();
+  private static readonly VISIBLE_FAIL_THRESHOLD = 3;
   /**
    * Cached humidity source per serial so steady-state polling costs one request
    * (units with a sensor/MHK2) or zero (units with neither). Re-discovered on
@@ -181,25 +187,31 @@ export class LocalKumoClient {
   ) {}
 
   /**
-   * Log a local-read failure at a VISIBLE level, but only on the transition into
-   * failure (and once on recovery), so a chronically unreachable unit can't spam a
-   * line every poll cycle. `debugMode` (the plugin's own `debug` flag) is visible in
-   * the normal log; plain `log.debug` is not unless Homebridge runs with `-D`.
+   * Track local-read failures and surface only SUSTAINED ones. A single failed poll
+   * that recovers on the next (the common `device_authentication_error` flap) stays at
+   * debug; only after VISIBLE_FAIL_THRESHOLD consecutive failures — a unit that's
+   * genuinely gone — does it log once at the visible level (and once on recovery).
+   * `debugMode` (the plugin's `debug` flag) is visible in the normal log; plain
+   * `log.debug` is not unless Homebridge runs with `-D`.
    */
   private noteLocalFail(serial: string, ip: string, reason: string): void {
-    if (this.failingSerials.has(serial)) {
-      this.log.debug(`[LOCAL] ${serial} @ ${ip}: still failing — ${reason}`);
-      return;
-    }
-    this.failingSerials.add(serial);
-    if (this.debugMode) {
-      this.log.info(`[LOCAL] ${serial} @ ${ip}: local read failing — ${reason}`);
+    const count = (this.failCounts.get(serial) ?? 0) + 1;
+    this.failCounts.set(serial, count);
+    if (count === LocalKumoClient.VISIBLE_FAIL_THRESHOLD && this.debugMode) {
+      this.log.info(`[LOCAL] ${serial} @ ${ip}: local reads failing (${count} in a row) — ${reason}`);
+    } else {
+      this.log.debug(`[LOCAL] ${serial} @ ${ip}: read failed (${count}) — ${reason}`);
     }
   }
 
   private noteLocalOk(serial: string): void {
-    if (this.failingSerials.delete(serial) && this.debugMode) {
-      this.log.info(`[LOCAL] ${serial}: local reads recovered`);
+    const count = this.failCounts.get(serial);
+    if (!count) {
+      return;
+    }
+    this.failCounts.delete(serial);
+    if (count >= LocalKumoClient.VISIBLE_FAIL_THRESHOLD && this.debugMode) {
+      this.log.info(`[LOCAL] ${serial}: local reads recovered after ${count} failure(s)`);
     }
   }
 
