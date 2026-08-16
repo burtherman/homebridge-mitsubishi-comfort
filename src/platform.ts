@@ -12,11 +12,16 @@ import * as os from 'os';
 
 import * as path from 'path';
 
+import * as fs from 'fs';
+
 import { PLATFORM_NAME, PLUGIN_NAME, KumoConfig } from './settings';
 import { KumoAPI } from './kumo-api';
 import { loadCredStore, saveCredStore } from './cred-store';
 import { KumoThermostatAccessory } from './accessory';
-import { LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds } from './local-api';
+import {
+  LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
+  parseArpTable, candidateIpsByMac,
+} from './local-api';
 import { MirrorController, MirrorStatePersistence } from './mirror';
 import { loadMirrorStore, saveMirrorStore } from './mirror-store';
 
@@ -56,6 +61,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   public localClient: LocalKumoClient | null = null;
   private localPollTimer: NodeJS.Timeout | null = null;
   private localSerials: string[] = [];
+  // Wi-Fi adapter MAC per serial (from the cloud /status), cached so the MAC→IP
+  // discovery fast-path doesn't re-hit the cloud on every retry pass.
+  private deviceMacs: Map<string, string> = new Map();
   private localCredRetryTimer: NodeJS.Timeout | null = null;
   private localCredRetryRunning: boolean = false;
   // serial -> candidate password already handed to discovery (from the disk
@@ -688,6 +696,21 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (toDiscover.size === 0) {
       return;
     }
+
+    // Fast path: resolve via the host ARP table (MAC→IP) before any subnet sweep.
+    // The cloud hands us each unit's MAC; if it's already in the ARP cache we get
+    // the IP for free. discoverDeviceIps still verifies each with the signed probe,
+    // so a stale ARP entry never mis-binds — it just falls through to the sweep.
+    // This is a pure optimization: any failure here must never block the sweep.
+    try {
+      this.admitResolved(await this.resolveLocalIpsViaArp(toDiscover), toDiscover);
+    } catch (error) {
+      this.log.debug(`Local control: ARP fast-path failed, using sweep — ${(error as Error).message}`);
+    }
+    if (toDiscover.size === 0) {
+      return;
+    }
+
     const hostIp = this.getHostIpv4();
     if (!hostIp) {
       this.log.warn('Local control: could not determine the host LAN subnet for discovery');
@@ -695,14 +718,85 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     }
     const candidates = enumerateSubnet(hostIp);
     this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
-    const ips = await discoverDeviceIps(this.log, candidates, toDiscover);
-    for (const [serial, ip] of ips) {
-      const c = toDiscover.get(serial)!;
+    this.admitResolved(await discoverDeviceIps(this.log, candidates, toDiscover), toDiscover);
+  }
+
+  /**
+   * Bind each resolved serial→IP to the local client and persist its (now
+   * probe-verified) credential, then drop it from `pending` so a later pass
+   * (e.g. the subnet sweep) only works the remainder. Persisting here is what
+   * captures v2-sourced creds: they enter as unvalidated candidates and only the
+   * ones a live adapter authenticated reach the store.
+   */
+  private admitResolved(found: Map<string, string>, pending: Map<string, SerialCreds>): void {
+    if (!this.localClient) {
+      return;
+    }
+    for (const [serial, ip] of found) {
+      const c = pending.get(serial);
+      if (!c) {
+        continue;
+      }
       this.localClient.setCreds(serial, { ...c, ip });
-      // The probe just proved this credential against the real adapter — persist
-      // it. This is what captures v2-sourced creds: they enter as unvalidated
-      // candidates, and only the validated ones reach the store.
       this.persistCred(serial, c);
+      pending.delete(serial);
+    }
+  }
+
+  /**
+   * MAC→IP fast path: read the host ARP cache, map it against each pending device's
+   * cloud-reported MAC, and verify the candidate IPs with the signed token probe.
+   * Returns serial→IP for the verified matches. Empty (→ full sweep) on any host
+   * without a readable /proc/net/arp, or when no MAC is in the cache yet.
+   */
+  private async resolveLocalIpsViaArp(pending: Map<string, SerialCreds>): Promise<Map<string, string>> {
+    const macToIp = this.readArpTable();
+    if (macToIp.size === 0) {
+      return new Map();
+    }
+    const macBySerial = await this.getDeviceMacs([...pending.keys()]);
+    const candidates = candidateIpsByMac(macBySerial, macToIp);
+    if (candidates.size === 0) {
+      return new Map();
+    }
+    const candidateIps = [...new Set(candidates.values())];
+    const subset = new Map<string, SerialCreds>();
+    for (const serial of candidates.keys()) {
+      subset.set(serial, pending.get(serial)!);
+    }
+    this.log.info(`Local control: resolving ${candidates.size} device(s) via ARP (${candidateIps.length} candidate IP(s))...`);
+    return discoverDeviceIps(this.log, candidateIps, subset, { warnUnfound: false, timeoutMs: 3000 });
+  }
+
+  /** Fetch (and cache) the Wi-Fi adapter MAC for each serial from the cloud /status. */
+  private async getDeviceMacs(serials: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    for (const serial of serials) {
+      let mac = this.deviceMacs.get(serial);
+      if (!mac) {
+        try {
+          const fetched = await this.kumoAPI.getDeviceMac(serial);
+          if (fetched) {
+            mac = fetched;
+            this.deviceMacs.set(serial, fetched);
+          }
+        } catch (error) {
+          this.log.debug(`Could not fetch MAC for ${serial}: ${(error as Error).message}`);
+        }
+      }
+      if (mac) {
+        out.set(serial, mac);
+      }
+    }
+    return out;
+  }
+
+  /** Read the Linux ARP cache into a MAC→IP map; empty on non-Linux / unreadable. */
+  private readArpTable(): Map<string, string> {
+    try {
+      return parseArpTable(fs.readFileSync('/proc/net/arp', 'utf8'));
+    } catch {
+      return new Map();
     }
   }
 

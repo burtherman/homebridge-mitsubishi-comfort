@@ -889,6 +889,20 @@ export class KumoAPI {
     return status?.cryptoSerial ?? null;
   }
 
+  /**
+   * Fetch a device's Wi-Fi adapter MAC from `/devices/{serial}/status`. The cloud
+   * does return it (confirmed live 2026-08-15 on all units), so a MAC→IP lookup in
+   * the host's ARP table can resolve a unit's LAN IP without a /24 sweep — and
+   * re-resolve it across DHCP lease changes. Returned lowercase, colon-separated.
+   */
+  async getDeviceMac(serial: string): Promise<string | null> {
+    const status = await this.makeAuthenticatedRequest<{ mac?: string }>(
+      `/devices/${serial}/status`,
+    );
+    const mac = status?.mac;
+    return typeof mac === 'string' && mac.length > 0 ? mac.toLowerCase() : null;
+  }
+
   /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
   requestAdapterStatus(serial: string): void {
     this.socket?.emit('force_adapter_request', serial, 'adapterStatus');

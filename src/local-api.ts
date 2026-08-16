@@ -320,6 +320,55 @@ export function enumerateSubnet(hostIpv4: string): string[] {
   return ips;
 }
 
+/**
+ * Parse the Linux ARP cache (`/proc/net/arp`) into a lowercase-MAC → IPv4 map.
+ * Format (whitespace-separated, one header line):
+ *   IP address   HW type   Flags   HW address          Mask   Device
+ *   192.168.50.5 0x1       0x2     dc:ef:ca:0a:4a:d9   *      eth0
+ * Skips the header, incomplete entries (flags `0x0` or the all-zero MAC), and any
+ * malformed row. Pure + exported so the resolution logic is unit-testable without fs.
+ */
+export function parseArpTable(procNetArp: string): Map<string, string> {
+  const macToIp = new Map<string, string>();
+  const lines = procNetArp.split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].trim().split(/\s+/);
+    if (cols.length < 4) {
+      continue;
+    }
+    const ip = cols[0];
+    const flags = cols[2];
+    const mac = cols[3].toLowerCase();
+    if (flags === '0x0' || mac === '00:00:00:00:00:00' || !/^(\d+\.){3}\d+$/.test(ip)) {
+      continue;
+    }
+    if (!macToIp.has(mac)) {
+      macToIp.set(mac, ip);
+    }
+  }
+  return macToIp;
+}
+
+/**
+ * Given each device's MAC and a MAC→IP map (e.g. from parseArpTable), return the
+ * serial→IP candidates we can try before a full subnet sweep. Case-insensitive on
+ * the MAC. These are candidates only — the caller still verifies each with the
+ * signed token probe, so a stale ARP entry simply fails to match and falls through.
+ */
+export function candidateIpsByMac(
+  macBySerial: Map<string, string>,
+  macToIp: Map<string, string>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [serial, mac] of macBySerial) {
+    const ip = mac ? macToIp.get(mac.toLowerCase()) : undefined;
+    if (ip) {
+      out.set(serial, ip);
+    }
+  }
+  return out;
+}
+
 type ProbeResult = 'match' | 'kumo' | null;
 
 /**
@@ -379,10 +428,11 @@ export async function discoverDeviceIps(
   log: Logger,
   candidateIps: string[],
   creds: Map<string, SerialCreds>,
-  opts: { concurrency?: number; timeoutMs?: number } = {},
+  opts: { concurrency?: number; timeoutMs?: number; warnUnfound?: boolean } = {},
 ): Promise<Map<string, string>> {
   const concurrency = opts.concurrency ?? 24;
   const timeoutMs = opts.timeoutMs ?? 3500;
+  const warnUnfound = opts.warnUnfound ?? true;
   const found = new Map<string, string>();
   const remaining = new Set(creds.keys());
 
@@ -405,7 +455,7 @@ export async function discoverDeviceIps(
     }
   });
 
-  if (remaining.size > 0) {
+  if (remaining.size > 0 && warnUnfound) {
     log.warn(`[LOCAL] ${remaining.size} device(s) not found on the LAN (will use cloud): ${[...remaining].join(', ')}`);
   }
   return found;
