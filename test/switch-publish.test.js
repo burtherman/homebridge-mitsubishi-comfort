@@ -96,13 +96,13 @@ function makeAccessory() {
   };
 }
 
-function makeHarness() {
+function makeHarness(log = makeLog()) {
   const updates = [];
   let profileCb = null;
   const platform = {
     Service,
     Characteristic,
-    log: makeLog(),
+    log,
     api: { updatePlatformAccessories: (a) => updates.push(a) },
   };
   const kumoAPI = {
@@ -151,6 +151,26 @@ test('re-applying the same profile does not re-publish (guarded on real change)'
   const afterFirst = updates.length;
   applyProfile(profile());
   assert.strictEqual(updates.length, afterFirst, 'no redundant HomeKit config bump');
+});
+
+test('the temperature-range line is logged once, not on every profile heartbeat', () => {
+  // profile_update is a ~15-min heartbeat carrying identical setpoint limits.
+  // Logging "Set temperature range" each tick fills the log; it must only fire
+  // when the range actually changes.
+  const infos = [];
+  const log = { info: (m) => infos.push(String(m)), warn() {}, error() {}, debug() {} };
+  const { applyProfile } = makeHarness(log);
+  const rangeLines = () => infos.filter((m) => /Set temperature range/.test(m)).length;
+
+  applyProfile(profile());
+  assert.strictEqual(rangeLines(), 1, 'logged once on the first profile');
+  applyProfile(profile()); // identical heartbeat
+  applyProfile(profile()); // identical heartbeat
+  assert.strictEqual(rangeLines(), 1, 'repeated identical profiles do not re-log');
+
+  // A genuinely different range logs again.
+  applyProfile(profile({ maximumSetPoints: { cool: 30, heat: 30, auto: 30 } }));
+  assert.strictEqual(rangeLines(), 2, 'a changed range re-logs exactly once');
 });
 
 test('dropping dry support removes the switch and publishes the removal', () => {

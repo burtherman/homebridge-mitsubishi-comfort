@@ -44,6 +44,9 @@ export class KumoThermostatAccessory {
   private readonly LOCAL_AUTHORITATIVE_MS = 45000;
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
+  // Last temperature range we logged, so a profile_update heartbeat (arrives every
+  // ~15 min and almost never changes the range) doesn't repeat the same info line.
+  private lastLoggedRange: string | null = null;
   private filterMaintenanceService: Service | null = null;
   private fanOnlyService: Service | null = null;
   private dryService: Service | null = null;
@@ -228,11 +231,18 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
       .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.1 });
 
-    const minTempF = (minTemp * 9 / 5) + 32;
-    const maxTempF = (maxTemp * 9 / 5) + 32;
-    this.platform.log.info(
-      `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
-    );
+    // Only log when the range actually changes. profile_update is a ~15-min
+    // heartbeat carrying the same limits every time; logging it each tick just
+    // fills the log (observed: 5 units × 4/hr = a wall of identical lines).
+    const rangeKey = `${minTemp}-${maxTemp}`;
+    if (rangeKey !== this.lastLoggedRange) {
+      this.lastLoggedRange = rangeKey;
+      const minTempF = (minTemp * 9 / 5) + 32;
+      const maxTempF = (maxTemp * 9 / 5) + 32;
+      this.platform.log.info(
+        `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
+      );
+    }
 
     // Add / remove the fan-only switch based on device capability
     if (profile.hasModeVent) {
