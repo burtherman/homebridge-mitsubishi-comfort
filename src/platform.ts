@@ -383,6 +383,15 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       // Start streaming for all devices
       const allDeviceSerials = discoveredDevices.map(d => d.deviceSerial);
       if (allDeviceSerials.length > 0) {
+        // Surface adapter reachability in HomeKit. Subscribe BEFORE streaming
+        // starts so the initial `device_status_v2` burst isn't missed — a unit
+        // that is already offline at boot should come up as No Response rather
+        // than serving a stale shadow record as if it were live.
+        this.kumoAPI.onDeviceConnectionStatusChange((serial, connected) => {
+          const handler = this.accessoryHandlers.find(h => h.getDeviceSerial() === serial);
+          handler?.setCloudConnected(connected);
+        });
+
         this.log.info('Starting streaming for real-time updates...');
         const streamingStarted = await this.kumoAPI.startStreaming(allDeviceSerials);
 
