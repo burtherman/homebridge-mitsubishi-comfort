@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.9.0
+**Current Version:** 1.10.0
 
 ## Polling and Token Management
 
@@ -230,6 +230,52 @@ HomeKit's `Thermostat` service has no dehumidify target state either, so dry is 
 - **Mutually exclusive with fan-only:** engaging dry optimistically flips the Fan switch off, and engaging fan-only flips the Dry switch off; changing the thermostat to HEAT / COOL / AUTO / OFF flips both off. Streaming/polling reconciles as the authoritative backstop. The optimistic cross-flip is unconditional because a successful command always leaves the unit in this switch's mode or `off` — never the sibling's mode.
 - **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). Since 1.7.1 a dry unit reports `TargetHeatingCoolingState === COOL` (was OFF), so the stock Home app shows a Cool tile with a settable setpoint while dehumidifying. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
 - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
+
+## Adapter reachability → HomeKit "No Response" (since 1.10.0)
+
+A unit whose Wi-Fi adapter is offline is surfaced as **No Response** rather than
+serving its last known state as if it were live.
+
+**Why:** when an adapter drops off the network the Kumo cloud keeps serving a
+**frozen shadow record**. Observed 2026-09-10: the rear bedroom's adapter was off
+the LAN for ~22h while `/sites/{id}/zones` still reported `mode=cool power=1
+connected=true` with an `updatedAt` from two minutes prior — the unit was physically
+off, and three `off` commands each returned HTTP 200 and reached nothing.
+
+**Trap — neither field in the zones payload means what it looks like:**
+`adapter.connected` was `true` for an adapter the cloud itself knew was
+IoT-Disconnected, and `adapter.updatedAt` ticks on unrelated row touches (a
+`profile_update` refresh). The only trustworthy freshness field is `lastUpdated`
+from `GET /devices/{serial}/status`. `routerRssi` there is also a *last-reported*
+value — the dead adapter still showed a healthy `-49 dBm` from the day before.
+Likewise, HTTP 200 from `/devices/send-command` only means the cloud queued it.
+
+**Mechanism:**
+- Source of truth is the `device_status_v2` streaming event (logged as "reported
+  offline (reason: IoT Disconnected)"). `onDeviceConnectionStatusChange` had existed
+  since the streaming work but had **no subscriber** — that was the entire bug.
+- `platform.ts` subscribes **before** `startStreaming`, so a unit already offline at
+  boot comes up unreachable instead of publishing a stale record.
+- `accessory.ts:isReachable()` — unreachable only when the cloud explicitly reports
+  the adapter disconnected **and** `localClient.hasLocal(serial)` is false. Local LAN
+  control overrides the cloud verdict entirely. `null` (nothing reported yet) counts
+  as reachable, so a fresh start never flashes No Response.
+- Every getter and setter calls `assertReachable()`, which throws
+  `HapStatusError(SERVICE_COMMUNICATION_FAILURE)`. The error is also *pushed* to the
+  characteristics on transition so the tile updates without waiting for a read.
+- A stale replay arriving while unreachable is cached (so recovery can republish it)
+  but is **not** published to HomeKit and does **not** fire the mirror hook — a frozen
+  reading must never be pushed onto a live mirror target.
+- Recovery republishes real state and clears the error.
+
+**Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
+regardless and does not propagate HAP error status. Confirm in the Home app, or by
+the asymmetry in the log: a write to an unreachable unit produces **no** `[CMD]` or
+`[MODE CHANGE]` line at all, because `assertReachable()` throws first.
+
+Code: `accessory.ts:setCloudConnected/isReachable/assertReachable/pushUnreachable/
+pushCurrentState`, `platform.ts` (subscription before streaming starts).
+Tests: `test/reachability.test.js`.
 
 ## Local LAN Control (since 1.7.0, opt-in)
 
