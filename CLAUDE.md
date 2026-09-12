@@ -67,7 +67,9 @@ JWT tokens expire every 20 minutes. We handle this with:
 - `GET /sites/{siteId}/groups` - System changeover groups (minRuntime, maxStandby)
 - `GET /devices/{serial}` - Full device info (includes `model` object with brand, gallery image)
 - `GET /devices/{serial}/profile` - Device capabilities (modes, fan speeds, setpoint limits)
-- `GET /devices/{serial}/status` - Connection status, `cryptoSerial`, `firmwareVersion`, `autoModeDisable`
+- `GET /devices/{serial}/status` - `firmwareVersion`, `routerSsid`, `routerRssi`, `lastUpdated`, `mac`, `minSetPoint`/`maxSetPoint`, `roomTempDisplayOffset`
+  - **No longer returns `cryptoSerial`** (Mitsubishi removed it ~2026-08-01). It also no
+    longer returns `autoModeDisable`. See `docs/LOCAL-CREDENTIAL-SOURCES.md`.
 - `GET /devices/{serial}/kumo-properties` - Reporting, `outdoorAirTemperature`, `heatModeDisable`
 
 **Commands:**
@@ -301,10 +303,23 @@ and live-verified against real hardware:
   concurrent local connection — pykumo locks, the HA lib dropped it, we keep it) and
   a forgiving `Promise.race` timeout (node-fetch v3 dropped the `timeout` option).
 
-**Credentials** (two per device, both already reachable from the cloud):
-- `password` (base64) — arrives ONLY in the `adapter_update` Socket.IO event we
-  already subscribe to (captured in `kumo-api.ts`, still stripped from logs).
-- `cryptoSerial` (hex, 9 bytes) — `GET /devices/{serial}/status` (`getDeviceCryptoSerial`).
+**Credentials** (two per device). **Read `docs/LOCAL-CREDENTIAL-SOURCES.md` before touching
+this — both original v3 sources are dead and the details are easy to rediscover the hard way.**
+
+- `password` (base64, 40 chars) — *used to* arrive in the `adapter_update` Socket.IO event
+  (captured in `kumo-api.ts`, still stripped from logs). **The event no longer carries it
+  as of ~2026-08-01.**
+- `cryptoSerial` (hex, 18 chars) — *used to* come from `GET /devices/{serial}/status`
+  (`getDeviceCryptoSerial`). **That field is gone too.**
+- **The only live source today is the legacy v2 endpoint** `POST https://geo-c.kumocloud.com/login`
+  (`fetchLegacyCredentials()`), which still returns both secrets per serial. Verified
+  end-to-end 2026-09-12: v2 credentials fetched fresh authenticate against real hardware.
+- The credential store `mitsubishi-comfort-local-creds.json` was captured 2026-07-30, about
+  25 hours before the v3 shutoff. **It cannot be rebuilt from v3. Back it up off-box.**
+- A unit whose v2 entry is stale (ours: front bedroom `0Y34P008Q100142F`) has no recovery
+  path we've found. Resets, power cycles, Wi-Fi reconnects and restarts have all been tried.
+  The plugin's "re-pair the unit in the app" log line is an unverified guess — upstream
+  evidence suggests a fresh registration doesn't issue a credential either.
 
 **Discovery** (`discoverDeviceIps`): the cloud provides neither IP nor MAC, so the
 plugin sweeps the host's /24 and matches each device to the adapter that

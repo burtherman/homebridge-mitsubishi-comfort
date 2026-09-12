@@ -360,7 +360,16 @@ Adapter hardware info. Sent in response to `force_adapter_request(serial, 'adapt
 }
 ```
 
-**Note:** Contains WiFi password — always strip before logging.
+**Note:** Contains the unit's local-API password — always strip before logging.
+
+> **⚠️ Out of date as of ~2026-08-01.** Mitsubishi removed `password` from this event.
+> It still fires, and still carries everything else, but the secret is gone — and
+> `firmwareVersion` here now reads `"00.00.00"` while `/devices/{serial}/status` reports
+> the real value for the same unit at the same moment. `GET /devices/{serial}/status`
+> stopped returning `cryptoSerial` in the same window.
+>
+> The legacy v2 endpoint still serves both secrets. Full account, timeline and
+> verification recipes: **`docs/LOCAL-CREDENTIAL-SOURCES.md`**.
 
 #### `acoil_update`
 Minimal event for A-coil (outdoor unit) data.

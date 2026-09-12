@@ -737,8 +737,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    * Log an accurate reason for each device that stayed on cloud control. The old
    * "not found on the LAN" wording was misleading: a unit can be plainly ON the LAN
    * (its MAC is in the ARP cache) yet fail to authenticate because its stored local
-   * credential is stale — a re-pair fixes that, whereas "not found" points at a
-   * network problem that isn't there. Distinguish the two from the MAC→ARP evidence.
+   * credential is stale, whereas "not found" points at a network problem that isn't
+   * there. Distinguish the two from the MAC→ARP evidence.
+   *
+   * This message used to end "re-pair the unit in the app to refresh its local key".
+   * That was a guess and it sent at least one debugging session down the wrong path.
+   * No credential source we know of can refresh a stale key any more — see
+   * docs/LOCAL-CREDENTIAL-SOURCES.md.
    */
   private reportUnresolved(pending: Map<string, SerialCreds>): void {
     if (pending.size === 0) {
@@ -750,8 +755,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       const ip = mac ? macToIp.get(mac.toLowerCase()) : undefined;
       if (ip) {
         this.log.warn(
-          `[LOCAL] ${serial} is on the LAN at ${ip} but its stored local credential didn't authenticate — ` +
-          'using cloud (re-pair the unit in the app to refresh its local key)',
+          `[LOCAL] ${serial} is on the LAN at ${ip} but its local credential didn't authenticate — ` +
+          'using cloud (no known way to refresh it; see docs/LOCAL-CREDENTIAL-SOURCES.md)',
         );
       } else {
         this.log.warn(`[LOCAL] ${serial} could not be reached or authenticated locally — using cloud`);
