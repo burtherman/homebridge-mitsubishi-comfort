@@ -159,29 +159,72 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `localPollInterval` - Seconds between local status polls when `localControl` is on (default: 15, min: 5, max: 120)
 - `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
 - `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
+- `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). The fork defaulted them off; ours stay on because they're the only HomeKit controls whose automations survive the Thermostat → HeaterCooler move.
+- `showHumiditySensor` - (2.0) Humidity as a `HumiditySensor` service (default true). Off also removes a cached one.
 
-## HomeKit Characteristics Mapping
+## HomeKit Characteristics Mapping (2.0: HeaterCooler)
+
+Each unit is a `HeaterCooler` (was `Thermostat` through 1.x). Ported from the fork
+`homebridge-mitsubishi-heatpump` (ukaratay, Apache-2.0) with attribution — see NOTICE and
+`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stages 5–7 still to do:
+Fanv2 fan speed, vane, schema/docs/release).
 
 | HomeKit Characteristic | Kumo API Field | Notes |
 |----------------------|----------------|-------|
+| Active | power + operationMode | ACTIVE iff `power === 1 && mode !== 'off'`. Power is separate from mode, so an off scene is always a real 1→0 — including dry/vent, which retires the 1.7.1 workaround |
+| CurrentHeaterCoolerState | power + mode + standby | INACTIVE (off), IDLE (standby, or vent), HEATING (heat/autoHeat), COOLING (cool/autoCool/dry). Plain `auto` infers from the band |
+| TargetHeaterCoolerState | operationMode | AUTO/HEAT/COOL only (no OFF: that's Active). dry/vent → COOL. **While off, shows the remembered power-on mode.** `validValues` limited by `hasModeHeat` |
 | CurrentTemperature | roomTemp | In Celsius |
-| TargetTemperature | spHeat/spCool | Depends on mode. Dry → `spCool` (Kumo v3 keeps the dry setpoint there; no `spDry` field), gated on `usesSetPointInDryMode` |
-| HeatingThresholdTemperature | spHeat | The low/heat edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
-| CoolingThresholdTemperature | spCool | The high/cool edge of the AUTO band (since 1.6.0). Surfaced by the Home app only in AUTO |
-| CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL. Since 1.7.1 **dry and vent report COOL** (not OFF) so a running dehumidify/fan-only unit shows as on ("Cooling"), not a misleading "Off" |
-| TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO. Since 1.7.1 **dry and vent map to COOL** so a scene/automation that sets the thermostat Off registers a real COOL→OFF transition iOS actually sends (it was suppressing the redundant Off→Off, so dry/vent units never turned off). Dry/vent are still *set* via their dedicated switches |
-| CurrentRelativeHumidity | humidity | Optional sensor |
-| FilterChangeIndication | displayConfig.filter | From streaming only |
+| HeatingThresholdTemperature | spHeat | THE heat setpoint in every mode (HEAT shows it; AUTO shows it as the low edge). Range = heat ∪ auto from the profile |
+| CoolingThresholdTemperature | spCool | THE cool setpoint in every mode, and the dry setpoint. Range = cool ∪ auto |
+| HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler |
+| FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
-| Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` service; ON sends `vent`, OFF sends `off` (powers the unit down) |
-| Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` service; ON sends `dry`, OFF sends `off`. Capability-gated on `hasModeDry`. Mutually exclusive with the Fan switch |
+| Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off` |
+| Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan |
+
+There is **no TargetTemperature**. Removing that second writer is what stops a scene's
+captured target from collapsing the AUTO band.
+
+**Migration:** the constructor removes a cached `Thermostat` service and logs
+`migrated Thermostat -> HeaterCooler`. Accessory UUIDs come from the serial, so name and
+room survive; automations bound to the thermostat must be recreated. Switch subtypes are
+unchanged, so switch automations survive. Owner's install: one automation (skylight opens →
+all units off) — rebuild it right after upgrading and verify from the log.
+
+### Power and mode (2.0)
+
+- **Power-on restores the last active mode.** HomeKit sends Active=1 with no mode, and an
+  off unit reports `'off'`. The fork fell back to AUTO (its `previousOperationMode` was
+  overwritten with the current mode). We keep `accessory.context.lastActiveMode` (persisted by
+  Homebridge), updated from every applied active status, seeded from the cloud's real
+  `previousOperationMode` when empty. No history at all → AUTO (COOL on a cooling-only unit).
+- **One burst, one command** (`queuePowerMode` / `flushPowerMode`). hap-nodejs dispatches every
+  handler in a write request concurrently without awaiting, so Active and
+  TargetHeaterCoolerState from one scene arrive in any order. A zero-delay timer coalesces
+  them: Active=0 wins (an off scene's captured mode rides along); Active=1 uses the burst's mode
+  or the remembered one; a mode alone turns the unit on in that mode unless an off is in
+  flight (`offInFlight`).
+- **Same-burst setpoints join the power-on.** A threshold written while the unit is off is
+  cached (can't be sent: `modeRequiredWhenDeviceOff`), and recorded in
+  `setpointsCachedWhileOff` unless an off is in flight. A power-on flushed within
+  `SAME_BURST_MS` (1s) includes it, so "on, cool, 72" is one command at 72. Older cached values
+  are never applied — an "AC off" scene re-sends stale setpoints, and applying those later is
+  the 1.8.2 bug. (The 1.x Thermostat had the same "setpoint lost at power-on" gap.)
+- Setpoints are snapped to the whole-°F grid in the setters (`quantize` →
+  `temperature.ts:quantizeSetpointInRange`): 72°F → 22.3°C.
+- `setThresholdRange` moves a characteristic's value into a new range before `setProps`, or
+  HAP warns (it starts the heating threshold at 0).
+- Checked against real hap-nodejs services inside a Homebridge `PlatformAccessory`
+  (2026-09-27): no characteristic warnings from the HeaterCooler. The one remaining warning
+  is pre-existing: `ConfiguredName` on the Switch services.
 
 ### Setpoint writes are held briefly (since 1.8.2)
 
-Every setpoint write from HomeKit (`TargetTemperature` and both AUTO handles) is
-held ~1.5s before it's sent (`accessory.ts:holdSetpointWrite`).
+Every threshold write from HomeKit is held ~1.5s before it's sent
+(`accessory.ts:holdSetpointWrite`).
 
-**Why:** an "AC off" scene re-pushes each thermostat's *captured* setpoints alongside
+**Why:** an "AC off" scene re-pushes each unit's *captured* setpoints alongside
 the off, and HomeKit dispatches them concurrently in arbitrary order. The 1.7.2
 `offRequestedAt` guard only catches setpoints landing *after* the off — one landing
 just *before* it arrives while the unit is still on, passes the guard, sends, and
@@ -191,46 +234,54 @@ kitchen) sat at 22.5°C, and since mirroring is edge-triggered nothing re-synced
 for 36 minutes. The hold means an off arriving in the same burst cancels the pending
 setpoint whichever order the two were dispatched in.
 
-Writes are keyed per setpoint (`'target'` / `'spHeat'` / `'spCool'`, so the two AUTO
-handles stay independent) with a generation counter — a superseded write is dropped
-silently (it must *not* cache its stale value over the newer one), so a drag sends only
-its final value. A write held across an off is cached + echoed, never sent, exactly
-like the existing suppression path.
+Writes are keyed per setpoint (`'spHeat'` / `'spCool'`, independent) with a generation
+counter — a superseded write is dropped silently (it must *not* cache its stale value over
+the newer one), so a drag sends only its final value. A write held across an off is cached +
+echoed, never sent, exactly like the existing suppression path. (1.x also had a `'target'` key
+for TargetTemperature; gone in 2.0.)
 
-### AUTO dual setpoints
+### Setpoints (HEAT, COOL, AUTO band)
 
-In AUTO, the Home app shows a temperature *range* (two handles) instead of a single setpoint, via the optional `HeatingThresholdTemperature` and `CoolingThresholdTemperature` characteristics on the Thermostat service.
-
-- **Heating handle ↔ `spHeat`** (low/heat edge), **cooling handle ↔ `spCool`** (high/cool edge). These units report `spAuto: null` and `autoModeDisable: false`, so AUTO uses the `spHeat`/`spCool` band — live-verified (every poll showed `Auto: null` with independent setpoints).
-- Both characteristics are added in the constructor (so they publish through the normal discovery path — no `publishStructureChange` needed) and their props are set to the device's supported range in `applyDeviceProfile`.
-- **Writes are independent:** dragging the heating handle sends `{ spHeat }`, the cooling handle sends `{ spCool }` — neither clobbers the other edge. Both inherit the 1.5.2 powered-off guard (cache + echo, no `modeRequiredWhenDeviceOff` 400) and revert on failure.
-- Zone/streaming updates sync both handles. The Home app only surfaces them in AUTO, so refreshing them in HEAT/COOL is harmless even when a unit's stale `spHeat`/`spCool` are inverted (each characteristic is independent within its own min/max props).
-- `TargetTemperature` and the HEAT/COOL/DRY paths are untouched.
-- Code: `accessory.ts:getHeatingThresholdTemperature / getCoolingThresholdTemperature / setThresholdTemperature`
-- Live-verified end-to-end on real hardware (2026-06-14): both handles round-trip to `spHeat`/`spCool`, the cloud holds the band across a streaming reconcile.
+- **Heating threshold ↔ `spHeat`**, **cooling threshold ↔ `spCool`**, in every mode. These units
+  report `spAuto: null` and `autoModeDisable: false`, so AUTO uses the `spHeat`/`spCool` band —
+  live-verified (1.6.0, 2026-06-14: both handles round-trip, the cloud holds the band).
+- Each gets its own mode's range widened to auto (`setpointRanges`). 1.x gave both the union of
+  all modes, so COOL offered HEAT-range values and the unit answered `invalidSpCoolRange`.
+- **Writes are independent:** each threshold sends only its own field. 1.5.2 powered-off guard
+  (cache + echo) and revert on failure.
+- Code: `accessory.ts:get/setHeatingThresholdTemperature, get/setCoolingThresholdTemperature,
+  setThresholdTemperature, quantize, setpointRanges, setThresholdRange`
 
 ### Fan-only switch
 
-HomeKit's `Thermostat` service has no fan-only target state, so we expose a second `Switch` service per accessory (subtype `fan-only`).
+HeaterCooler has no fan-only mode, so it's a second `Switch` service per accessory (subtype `fan-only`).
 
-- **Capability-gated:** the switch is only added once the device profile reports `hasModeVent === true`. If a cached accessory carries a switch but the profile reports no vent support, it's removed.
+- **Capability-gated:** added once the profile reports `hasModeVent === true` (and
+  `showFanOnlySwitch !== false`); removed otherwise.
 - **Switch ON** → `sendCommand({ operationMode: 'vent', power: 1 })`
 - **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
-- The `power` field is sent explicitly on the fan path to match the verified v3 cloud reference ([EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws)); the existing HEAT/COOL/AUTO path still omits `power` since the API derives it from a non-off `operationMode`.
-- The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'vent'`.
-- Changing the thermostat to HEAT / COOL / AUTO / OFF optimistically flips the switch off. Engaging the switch optimistically drives the thermostat to its mapped state — since 1.7.1 vent maps to **COOL** (was OFF), so a scene-off registers a real transition (see the 1.7.1 note in Version History); the optimistic update derives both Current/Target from `mapTo*HeatingCoolingState`.
+- The `power` field is sent explicitly on the switch paths to match the verified v3 cloud reference ([EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws)); the power/mode path omits `power` since the API derives it from `operationMode`.
+- Kept in sync with streaming/polling: ON iff `power === 1 && operationMode === 'vent'`.
+- Power/mode changes set both switches from the resulting status. Engaging the switch refreshes
+  the HeaterCooler (Active, IDLE, target COOL) via `refreshClimateCharacteristics`.
+- History: through 1.x on the Thermostat, 1.7.1 had to report vent (and dry) as COOL so an off
+  scene wasn't suppressed as Off→Off. HeaterCooler's separate `Active` makes that unnecessary.
 - Code: `accessory.ts:setupFanOnlySwitch / removeFanOnlySwitch / setFanOnlyOn / isFanOnlyActive`
 
 ### Dry switch
 
-HomeKit's `Thermostat` service has no dehumidify target state either, so dry is surfaced the same way as fan-only: a separate `Switch` service per accessory (subtype `dry`).
+Same shape as fan-only: a separate `Switch` (subtype `dry`).
 
-- **Capability-gated:** added only once the device profile reports `hasModeDry === true` (a real top-level field in the v3 profile payload — see `API-EXPLORATION-FINDINGS.md`). A cached switch on a device that reports no dry support is removed.
-- **Switch ON** → `sendCommand({ operationMode: 'dry', power: 1 })`
-- **Switch OFF** → `sendCommand({ operationMode: 'off', power: 0 })` — turns the unit off entirely
-- The switch is kept in sync with streaming/polling updates: ON iff `power === 1 && operationMode === 'dry'`.
-- **Mutually exclusive with fan-only:** engaging dry optimistically flips the Fan switch off, and engaging fan-only flips the Dry switch off; changing the thermostat to HEAT / COOL / AUTO / OFF flips both off. Streaming/polling reconciles as the authoritative backstop. The optimistic cross-flip is unconditional because a successful command always leaves the unit in this switch's mode or `off` — never the sibling's mode.
-- **Setpoint (since 1.5.3):** units that report `usesSetPointInDryMode === true` accept a target while dehumidifying, and the Kumo v3 cloud keeps that target in **`spCool`** (there is no `spDry` field). The on/off Dry *switch* can't express a temperature, but the **Thermostat's `TargetTemperature` characteristic** now reads/writes `spCool` while in dry (see `getTargetTempFromStatus` / `setTargetTemperature` / `dryUsesSetpoint`). Since 1.7.1 a dry unit reports `TargetHeatingCoolingState === COOL` (was OFF), so the stock Home app shows a Cool tile with a settable setpoint while dehumidifying. On units that report `usesSetPointInDryMode === false`, dry stays setpoint-less (the write falls through to the heat branch and the read falls back as before).
+- **Capability-gated:** `hasModeDry === true` (a real top-level field in the v3 profile payload — see `API-EXPLORATION-FINDINGS.md`) and `showDrySwitch !== false`.
+- **Switch ON** → `sendCommand({ operationMode: 'dry', power: 1 })`; **OFF** → `{ operationMode: 'off', power: 0 }`.
+- Kept in sync: ON iff `power === 1 && operationMode === 'dry'`.
+- **Mutually exclusive with fan-only:** engaging one optimistically flips the other off; a
+  power/mode change sets both from the resulting status. Streaming/polling reconciles.
+- **Setpoint (since 1.5.3):** units with `usesSetPointInDryMode === true` accept a target while
+  dehumidifying, kept in **`spCool`** (there is no `spDry`). On the HeaterCooler a dry unit
+  reports target COOL, so the Home app shows the cooling threshold, which reads/writes `spCool`.
+  The profile flag still gates the one place the plugin adds a dry setpoint itself: a
+  power-on restoring dry (`attachSameBurstSetpoints`), and the mirror (`applyMirror`).
 - Code: `accessory.ts:setupDrySwitch / removeDrySwitch / setDryOn / isDryActive`
 
 ## Adapter reachability → HomeKit "No Response" (since 1.10.0)
