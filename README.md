@@ -329,3 +329,8 @@ limitations under the License.
 ## Credits
 
 Based on the Kumo Cloud v3 API and inspired by [homebridge-kumo](https://github.com/fjs21/homebridge-kumo).
+
+- Local LAN control is a port of [pykumo](https://github.com/dlarrick/pykumo) by dlarrick (MIT License).
+- The fan-speed and vane vocabularies, the Fahrenheit setpoint grid and parts of the test harness are derived from [homebridge-mitsubishi-heatpump](https://github.com/ukaratay/homebridge-mitsubishi-heatpump) by Durmus Karatay (Apache License 2.0), a fork of this plugin.
+
+See [NOTICE](NOTICE) for the full attributions.

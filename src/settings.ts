@@ -92,8 +92,11 @@ export interface Adapter {
   power: number;
   operationMode: string;
   previousOperationMode: string;
-  fanSpeed: string;
-  airDirection: string;
+  // NOT in the `GET /sites/{siteId}/zones` payload (it sends null): fan speed and vane
+  // arrive only in the streaming `device_update` and in local reads. Optional so every
+  // reader has to handle "unknown" — processZoneUpdate carries the last known value.
+  fanSpeed?: string | null;
+  airDirection?: string | null;
   connected: boolean;
   isSimulator: boolean;
   hasSensor: boolean;

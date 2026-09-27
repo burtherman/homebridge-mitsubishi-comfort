@@ -550,8 +550,9 @@ export class KumoThermostatAccessory {
         power: data.power!,
         operationMode: data.operationMode!,
         previousOperationMode: data.operationMode!,
-        fanSpeed: data.fanSpeed || 'auto',
-        airDirection: data.airDirection || 'auto',
+        // Unknown stays unknown: processZoneUpdate carries the last known value.
+        fanSpeed: data.fanSpeed || undefined,
+        airDirection: data.airDirection || undefined,
         connected: true,
         isSimulator: false,
         hasSensor: data.humidity !== null && data.humidity !== undefined,
@@ -777,8 +778,8 @@ export class KumoThermostatAccessory {
         power: status.power!,
         operationMode: status.operationMode!,
         previousOperationMode: status.operationMode!,
-        fanSpeed: status.fanSpeed || 'auto',
-        airDirection: status.airDirection || 'auto',
+        fanSpeed: status.fanSpeed || undefined,
+        airDirection: status.airDirection || undefined,
         connected: true,
         isSimulator: false,
         hasSensor: (status.humidity ?? this.currentStatus?.humidity) != null,
@@ -919,12 +920,26 @@ export class KumoThermostatAccessory {
         power: zone.adapter.power,
         operationMode: zone.adapter.operationMode,
         humidity: zone.adapter.humidity,
-        fanSpeed: zone.adapter.fanSpeed,
-        airDirection: zone.adapter.airDirection,
+        // A cloud zone poll carries neither fan speed nor vane (it sends null). Keep
+        // the last known value instead: the mirror's signature includes fan speed,
+        // so a null here flipped it every time updates alternated between a poll and
+        // streaming, which reads as a source change and fires a spurious push.
+        fanSpeed: zone.adapter.fanSpeed ?? this.currentStatus?.fanSpeed ?? 'auto',
+        airDirection: zone.adapter.airDirection ?? this.currentStatus?.airDirection ?? 'auto',
         roomTemp: zone.adapter.roomTemp,
         spCool: zone.adapter.spCool,
         spHeat: zone.adapter.spHeat,
         spAuto: zone.adapter.spAuto,
+        // Not in any zone payload: streaming (displayConfig) and local reads set these
+        // AFTER this rebuild, and a cloud poll never sets them. Replacing the status
+        // object used to wipe them, so a poll cleared the filter flag and standby until
+        // the next streaming update. Carry the last known values.
+        // (Carry-forward ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
+        standby: this.currentStatus?.standby,
+        defrost: this.currentStatus?.defrost,
+        filterDirty: this.currentStatus?.filterDirty,
+        modelNumber: this.currentStatus?.modelNumber,
+        connected: this.currentStatus?.connected,
       };
 
       // Attribute observed power/mode transitions at INFO. Every command we SEND is
@@ -1722,13 +1737,11 @@ export class KumoThermostatAccessory {
 
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
     this.assertReachable();
-    if (!this.currentStatus) {
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      }
-    }
-
+    // Cached only, like every other getter. This used to fetch
+    // GET /devices/{serial}/status when nothing was cached yet and store the result
+    // AS the unit's status — but that endpoint returns firmware/Wi-Fi fields, not
+    // mode or temperatures, so every other getter then read a record with no
+    // operationMode or roomTemp until the next real update replaced it.
     const humidity = this.currentStatus?.humidity || 0;
     this.platform.log.debug('Get CurrentRelativeHumidity:', humidity);
     return humidity;

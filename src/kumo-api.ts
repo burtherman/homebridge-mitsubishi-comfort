@@ -616,7 +616,9 @@ export class KumoAPI {
           this.log.info(`    ${zone.name} [${a.deviceSerial}]`);
           this.log.info(`      Temperature: ${a.roomTemp}°C (current) → Heat: ${a.spHeat}°C, Cool: ${a.spCool}°C, Auto: ${a.spAuto}°C`);
           this.log.info(`      Status: ${a.operationMode} mode, power=${a.power}, connected=${a.connected}`);
-          this.log.info(`      Fan: ${a.fanSpeed}, Direction: ${a.airDirection}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
+          // The zones payload never carries fan speed or vane (they come from streaming
+          // and local reads), so say that instead of printing "undefined" for every unit.
+          this.log.info(`      Fan: ${a.fanSpeed ?? 'n/a in zone data'}, Direction: ${a.airDirection ?? 'n/a in zone data'}, Humidity: ${a.humidity !== null ? a.humidity + '%' : 'N/A'}`);
           this.log.info(`      Signal: ${a.rssi !== undefined ? a.rssi + ' dBm' : 'N/A'}`);
         });
       }

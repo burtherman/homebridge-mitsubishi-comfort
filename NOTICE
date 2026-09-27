@@ -1,0 +1,51 @@
+homebridge-mitsubishi-comfort
+Copyright 2025-2026 Burt Herman
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes software from the following projects.
+
+================================================================================
+1. homebridge-mitsubishi-heatpump
+================================================================================
+
+Portions of this product are derived from homebridge-mitsubishi-heatpump, a fork
+of this project, used under the Apache License, Version 2.0:
+
+    https://github.com/ukaratay/homebridge-mitsubishi-heatpump
+    Copyright 2026 Durmus Karatay
+
+Files that contain such portions say so in a header comment, naming the fork
+commit they came from. They have been modified; the commit history and
+CHANGELOG.md describe the changes.
+
+================================================================================
+2. pykumo
+================================================================================
+
+The local LAN protocol in src/local-api.ts, including its security-token
+algorithm, is a port of pykumo, used under the MIT License:
+
+    https://github.com/dlarrick/pykumo
+
+    MIT License
+
+    Copyright (c) 2019 dlarrick
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
