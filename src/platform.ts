@@ -32,13 +32,40 @@ const LOCAL_CRED_RETRY_MS = 60000;
 /** How long each retry pass waits for a nudged device to answer. */
 const LOCAL_CRED_RETRY_WAIT_MS = 10000;
 
+/**
+ * Why the platform config is unusable, or null if it's fine.
+ *
+ * The constructor must not throw on a bad config. Homebridge constructs platforms
+ * without a try/catch, so a throw there stops the whole Homebridge process, taking
+ * every other plugin down with it, and the service restarts straight back into the
+ * same error. A plugin with a missing password should sit idle, not do that.
+ */
+export function validateConfig(config: KumoConfig): string | null {
+  if (!config.username || !config.password) {
+    return 'Username and password are required.';
+  }
+  if (typeof config.username !== 'string' || !config.username.includes('@')) {
+    return 'Username must be the email address you use for the Kumo / Comfort app.';
+  }
+  if (typeof config.password !== 'string' || config.password.trim().length === 0) {
+    return 'Password must be a non-empty string.';
+  }
+  if (config.pollInterval !== undefined
+    && (typeof config.pollInterval !== 'number' || config.pollInterval < 5)) {
+    return 'Poll interval must be a number of at least 5 seconds.';
+  }
+  return null;
+}
+
 export class KumoV3Platform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service = this.api.hap.Service;
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
 
   public readonly accessories: PlatformAccessory[] = [];
   private readonly accessoryHandlers: KumoThermostatAccessory[] = [];
-  private readonly kumoAPI: KumoAPI;
+  // Definitely assigned unless the config is invalid, in which case the constructor
+  // returns early and no code path that uses it is ever registered.
+  private readonly kumoAPI!: KumoAPI;
   private readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
@@ -107,34 +134,15 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     const kumoConfig = this.kumoConfig;
 
-    // Validate required configuration
-    if (!kumoConfig.username || !kumoConfig.password) {
-      this.log.error('Username and password are required in config');
-      throw new Error('Missing required configuration');
-    }
-
-    // Validate username format (should be an email)
-    if (typeof kumoConfig.username !== 'string' || !kumoConfig.username.includes('@')) {
-      this.log.error('Username must be a valid email address');
-      throw new Error('Invalid username format');
-    }
-
-    // Validate password is a non-empty string
-    if (typeof kumoConfig.password !== 'string' || kumoConfig.password.trim().length === 0) {
-      this.log.error('Password must be a non-empty string');
-      throw new Error('Invalid password format');
-    }
-
-    // Validate pollInterval if provided
-    if (kumoConfig.pollInterval !== undefined) {
-      if (typeof kumoConfig.pollInterval !== 'number' || kumoConfig.pollInterval < 5) {
-        this.log.error('Poll interval must be a number >= 5 seconds');
-        throw new Error('Invalid poll interval');
-      }
-    }
-
     // Configure degraded mode polling interval
     this.degradedPollInterval = (kumoConfig.degradedPollInterval || 10) * 1000;
+
+    const configError = validateConfig(kumoConfig);
+    if (configError) {
+      this.log.error(`Config error: ${configError} The plugin is idle until this is fixed in its settings.`);
+      return;
+    }
+
     this.log.debug(`Degraded polling interval: ${this.degradedPollInterval / 1000}s`);
 
     this.kumoAPI = new KumoAPI(

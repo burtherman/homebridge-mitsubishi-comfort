@@ -10,20 +10,17 @@
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "Kumo",
-        "required": true
+        "default": "Kumo"
       },
       "username": {
         "title": "Username",
         "type": "string",
-        "required": true,
         "format": "email",
         "description": "Your Kumo Cloud email address"
       },
       "password": {
         "title": "Password",
         "type": "string",
-        "required": true,
         "description": "Your Kumo Cloud password"
       },
       "pollInterval": {
@@ -110,21 +107,21 @@
             "source": {
               "title": "Source Device Serial",
               "type": "string",
-              "required": true,
               "placeholder": "e.g., 9X34P008S100095F",
               "description": "The unit to copy from (found in logs during device discovery)"
             },
             "target": {
               "title": "Target Device Serial",
               "type": "string",
-              "required": true,
               "placeholder": "e.g., 9X34P008S100096A",
               "description": "The unit that follows the source"
             }
-          }
+          },
+          "required": ["source", "target"]
         }
       }
-    }
+    },
+    "required": ["name", "username", "password"]
   },
   "layout": [
     {
