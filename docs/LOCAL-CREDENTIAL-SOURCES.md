@@ -1,7 +1,7 @@
 # Local credentials: where they come from, and what broke
 
 **Last verified: 2026-09-12** (re-verify before trusting any of this; Mitsubishi changes
-the cloud without notice)
+the cloud without notice). Upstream reports added 2026-09-27.
 
 Local LAN control needs two secrets per device:
 
@@ -47,7 +47,7 @@ minSetPoint, maxSetPoint, lastUpdated, mac
 `getDeviceCryptoSerial()` in `kumo-api.ts` therefore returns nothing. We survive on the
 credential store, and on source 3.
 
-### 3. Legacy v2 (`https://geo-c.kumocloud.com/login`) — **still works**
+### 3. Legacy v2 (`https://geo-c.kumocloud.com/login`) — **still works, for old records only**
 
 `POST /login` with `{ username, password, appVersion: '2.2.0' }` returns a nested tree
 containing per-serial objects with **both** `password` and `cryptoSerial`. Walk the tree
@@ -59,8 +59,27 @@ authenticated against three units on the LAN. For the four units where we hold a
 known-good cached credential, the v2 values are **byte-identical** — password and
 cryptoSerial both.
 
-This is the only live credential source left, and as far as we can tell the upstream
-community does not know it exists. See "Worth reporting upstream" below.
+This is the only live credential source left.
+
+**It only covers units registered before the Comfort switchover, as they were then.** v2
+serves a frozen copy of the old Kumo account data, and nothing written since reaches it:
+
+- **Newer accounts get nothing.** For an account with no pre-switchover record, v2
+  answers `200 null` to a wrong password and HTTP 500 to the correct one (taolong75,
+  pykumo #78, 2026-08-22). The 500 is not an auth failure. joshuat hit the same 500 on a
+  very new account (pykumo #78, 2026-09-27).
+- **Changes after the switchover don't show up.** We removed the front bedroom in the
+  Comfort app and added it back on 2026-08-05. v3 created a new adapter record for it
+  (same serial, new creation date), and v2 kept returning the same password and
+  cryptoSerial as before. dlarrick, pykumo's maintainer, says v2 doesn't work "for new
+  users, and not for anything that has changed since Mitsubishi switched over to Comfort"
+  ([hass-kumo #230](https://github.com/dlarrick/hass-kumo/issues/230#issuecomment-5649238466),
+  2026-09-12). He's also seen v2 serve stale IP addresses (pykumo #78, 2026-08-20).
+
+v2 has records for our units because all five were registered in the old Kumo app before
+the switchover. **A unit added to this account from now on gets no local credential from any
+source we know of.** Don't remove and re-add a working unit to test this either: if that
+rotates the adapter's key (suspected, not shown), v2 will keep serving the old one.
 
 ## Timeline
 
@@ -71,7 +90,11 @@ community does not know it exists. See "Worth reporting upstream" below.
 | **2026-07-30 02:12 UTC** | **Our credential store was captured — 4 of 5 units** |
 | 2026-07-31 | pykumo #78 and hass-kumo #230 opened |
 | 2026-08-01 03:03 UTC | v3 confirmed no longer returning either secret, any endpoint, any `X-App-Version` |
-| 2026-09-12 | We verify legacy v2 still serves working credentials |
+| 2026-08-05 | Front bedroom removed and re-added in the Comfort app; v2 keeps serving the same credential |
+| 2026-08-22 | taolong75 (pykumo #78): v2 returns HTTP 500 for accounts with no pre-switchover record |
+| 2026-09-12 | We verify legacy v2 still serves working credentials and post it to pykumo #78 and hass-kumo #230 |
+| 2026-09-12 | dlarrick replies: v2 doesn't cover new users or anything changed since the switchover |
+| 2026-09-27 | joshuat (pykumo #78): v2 500 on a new account, asks whether moving units to an older account would help. [Our reply](https://github.com/dlarrick/pykumo/issues/78#issuecomment-5859953595): our Aug 5 re-add didn't change v2, so probably not |
 
 Our store predates the shutoff by roughly 25 hours. **Those four credentials are
 effectively irreplaceable from v3.** Both recoveries reported in hass-kumo #230 came from
@@ -91,10 +114,17 @@ of 5; a second reporter in the same thread sees 1 of 2. Deleting and re-adding t
 integration doesn't change which units are covered, and neither does logging out and back
 into the Comfort app.
 
-Our front bedroom `0Y34P008Q100142F` is an instance of this. It has never produced a
-password via the socket — it was already missing when the store was built on 2026-07-30
-at 4 of 5. Its legacy v2 entry exists but does **not** authenticate, so v2's copy for that
-unit is stale or wrong in a way that we can't correct from outside.
+We first filed our front bedroom `0Y34P008Q100142F` as an instance of this. It has never
+produced a password via the socket — it was already missing when the store was built on
+2026-07-30 at 4 of 5. Its legacy v2 entry exists but does **not** authenticate, so v2's
+copy for that unit is stale or wrong in a way that we can't correct from outside. Its
+cryptoSerial is correct (it matches a December 2025 mitmproxy capture), so the password is
+the stale half.
+
+The frozen-v2 finding above gives a simpler explanation than #220: if this adapter's key
+changed after the switchover, v2 would still hand out the old one. As far as we remember
+it's the only unit that was ever disconnected and reconnected in the Comfort app, which
+fits. We don't know when that first happened, though, so this is unproven.
 
 **Things that have been tried and did not fix it:**
 
@@ -104,6 +134,8 @@ unit is stale or wrong in a way that we can't correct from outside.
 - Power cycle
 - Child bridge restart, which re-runs the full nudge sequence — all 3 retry attempts fail
   identically
+- Removing it in the Comfort app and adding it back (2026-08-05). v3 made a new adapter
+  record; v2 returned the same credential as before
 
 **Things reported upstream as not fixing the equivalent problem:**
 
@@ -112,10 +144,9 @@ unit is stale or wrong in a way that we can't correct from outside.
   issued (aphollis, hass-kumo #230, 2026-08-30). This is the closest available test of the
   "just re-pair it in the app" theory, and it comes back negative.
 
-The plugin's own log line says "re-pair the unit in the app to refresh its local key"
-(`src/platform.ts`). **That advice is unverified and probably wrong** — it was written as
-a plausible guess, not from evidence. Don't treat it as a finding. It should be softened
-or dropped.
+The plugin's log line used to say "re-pair the unit in the app to refresh its local key".
+That was a guess, not a finding, and it's gone: the warning in
+`platform.ts:reportUnresolved` now says there's no known way to refresh the key.
 
 ## Verification recipes
 
@@ -181,12 +212,16 @@ serial format), which is consistent with the password being random per-device se
 material provisioned at manufacture — i.e. not derivable, only retrievable from the cloud.
 That matches the failed brute-force in pykumo #57.
 
-## Worth reporting upstream
+## Reported upstream
 
-pykumo #78 is open with the maintainer and several users hard-blocked, all believing no
-credential source remains. jonwales asked in that thread on 2026-08-22 how this plugin
-still works and linked this repo; nobody answered. The legacy v2 endpoint is the answer
-and it is still live.
+We posted the v2 endpoint to pykumo #78 and hass-kumo #230 on 2026-09-12, answering
+jonwales's 2026-08-22 question about how this plugin still works. dlarrick replied the same
+day that v2 doesn't help new users or anything changed since the switchover. That's
+correct, and it's written up under source 3 above. On 2026-09-27 we replied to joshuat's
+idea of moving units to an older account (see the timeline).
+
+Worth checking back: dlarrick said he's adding indoor units to his own account this fall
+and will confirm the new-unit behavior first-hand.
 
 ## References
 

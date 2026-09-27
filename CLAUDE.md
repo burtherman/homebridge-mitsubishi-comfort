@@ -314,12 +314,16 @@ this — both original v3 sources are dead and the details are easy to rediscove
 - **The only live source today is the legacy v2 endpoint** `POST https://geo-c.kumocloud.com/login`
   (`fetchLegacyCredentials()`), which still returns both secrets per serial. Verified
   end-to-end 2026-09-12: v2 credentials fetched fresh authenticate against real hardware.
+  **v2 is a frozen pre-switchover snapshot.** It returns HTTP 500 for accounts with no old
+  record and hasn't picked up any later change we've seen (a 2026-08-05 remove/re-add left
+  it unchanged).
+  A unit added to the account now gets no local credential from anywhere.
 - The credential store `mitsubishi-comfort-local-creds.json` was captured 2026-07-30, about
   25 hours before the v3 shutoff. **It cannot be rebuilt from v3. Back it up off-box.**
 - A unit whose v2 entry is stale (ours: front bedroom `0Y34P008Q100142F`) has no recovery
   path we've found. Resets, power cycles, Wi-Fi reconnects and restarts have all been tried.
-  The plugin's "re-pair the unit in the app" log line is an unverified guess — upstream
-  evidence suggests a fresh registration doesn't issue a credential either.
+  So was removing and re-adding it in the Comfort app. The old "re-pair the unit in the app"
+  log line was a guess and has been removed.
 
 **Discovery** (`discoverDeviceIps`): the cloud provides neither IP nor MAC, so the
 plugin sweeps the host's /24 and matches each device to the adapter that
