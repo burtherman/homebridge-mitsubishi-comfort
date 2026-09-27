@@ -30,7 +30,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 
 ### Prerequisites
 
-- Node.js (v18.0.0 or higher)
+- Node.js 20.19 or higher (22.12 or higher on Node 22). Older versions fail to load the plugin with `ERR_REQUIRE_ESM`
 - Homebridge (v1.6.0 or higher, including v2.x)
 
 ### Install from NPM
