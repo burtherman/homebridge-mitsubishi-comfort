@@ -21,6 +21,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Fan-only and Dry (dehumidify) modes** — exposed as per-unit switches (HomeKit's thermostat has no state for them)
 - **0.1°C setpoint resolution** for faithful °F round-tripping between Home and the Kumo app
 - Current temperature and humidity display, plus a filter-change indicator
+- **Offline units show "No Response"** instead of a stale reading when the cloud reports the unit's Wi-Fi adapter disconnected (unless it's still reachable over the LAN)
 - Automatic token refresh
 - Multi-site and multi-zone support
 - Device exclusion/hiding support
@@ -78,7 +79,7 @@ Add the following to your Homebridge `config.json`:
 | `disablePolling` | boolean | No | **Recommended:** Disable polling when streaming is healthy (auto-enables if streaming fails, default: false) |
 | `degradedPollInterval` | number | No | Fast polling interval when streaming is unhealthy in seconds (default: 10, minimum: 5, maximum: 60) |
 | `streamingHealthCheckInterval` | number | No | How often to check if streaming is healthy in seconds (default: 30, minimum: 10, maximum: 300) |
-| `streamingStaleThreshold` | number | No | Consider streaming stale if no updates received for this long in seconds (default: 60, minimum: 30, maximum: 600) |
+| `streamingStaleThreshold` | number | No | Deprecated and ignored; kept so existing configs still validate |
 | `excludeDevices` | string[] | No | Array of device serial numbers to hide from HomeKit |
 | `debug` | boolean | No | Enable debug logging (default: false) |
 | `localControl` | boolean | No | **Opt-in (default: false).** Control units directly over the LAN; cloud stays for discovery/credentials and as a per-unit fallback. See [Local LAN Control](#local-lan-control) |
@@ -148,17 +149,26 @@ By default the plugin controls your units through the Kumo Cloud. With `localCon
 
 **How it works:**
 
-- The cloud is still used once at startup for **discovery and credentials** (each unit's local password and key). The plugin then **discovers each unit's IP** by sweeping your local subnet — no manual setup required.
+- Each unit needs two local credentials (a password and a key). The plugin finds each unit's IP by looking up its MAC address in the host's ARP cache, then sweeping your local subnet for any it didn't find. No manual setup is required unless you want to pin IPs (below).
+- Working credentials are saved to `mitsubishi-comfort-local-creds.json` in the Homebridge storage folder, so they survive restarts. **Back this file up** (see the credentials note below).
 - Commands go **local-first with automatic cloud fallback**: if a unit isn't reachable locally, that unit transparently uses the cloud.
 - Status is read by **local polling** (`localPollInterval`, default 15s). Cloud streaming stays connected as the fallback.
 - It's **per-unit and self-healing** — a unit on a different VLAN, or one that's temporarily unreachable, just uses the cloud.
 
 **Requirements & notes:**
 
-- Your Homebridge host must be on the **same network** as the units (a routable subnet). VLAN-segmented IoT networks will fall back to cloud.
-- Optional: set `localControlIps` to a `{ "<serial>": "<ip>" }` map to skip discovery (e.g. if you've assigned static IPs).
+- Discovery only searches the Homebridge host's own subnet. Units on another VLAN work if Homebridge can route to them and you list them in `localControlIps`.
+- Optional: set `localControlIps` to a `{ "<serial>": "<ip>" }` map to skip discovery (e.g. if you've assigned static IPs). The settings form can't edit it yet; use the JSON config editor.
 - **Toggling `localControl` requires a full Homebridge restart**, not just a child-bridge restart — child bridges receive their config from the main process.
 - Local control is currently marked experimental; if anything misbehaves, set `localControl: false` to return to pure cloud.
+
+**Local credentials: read this before relying on local control.** Around August 1, 2026, Mitsubishi's current (v3) cloud API stopped handing out the local credentials. The plugin now gets them from, in order: the saved credentials file above, then Kumo's legacy v2 API. The legacy API only has records for accounts and units registered **before the switch to the Comfort app**, as they were then. What that means in practice:
+
+- **New accounts get no local credentials.** The log says `Legacy v2 credential source returned HTTP 500`. Those units use the cloud.
+- **A unit removed and re-added in the Comfort app, or added since the switchover, usually gets none either**, even on an older account. The log says the unit `rejected its local credential`. Re-pairing it in the app does not fix this.
+- **If you already have working local control, back up `mitsubishi-comfort-local-creds.json`.** It can't be rebuilt from the cloud.
+
+Everything else keeps working over the cloud. The full background is in [docs/LOCAL-CREDENTIAL-SOURCES.md](docs/LOCAL-CREDENTIAL-SOURCES.md).
 
 ## Device Mirroring
 
@@ -264,7 +274,7 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 - `wss://socket-prod.kumocloud.com` - Real-time device updates via Socket.IO
 - Emits `subscribe` event with device serial to receive updates
 - Receives `device_update` events with full device state
-- Receives `adapter_update` events (used to obtain each unit's local credentials for local control)
+- Receives `device_status_v2` events (whether each unit's Wi-Fi adapter is connected; drives No Response)
 
 ### Local LAN (when `localControl` is enabled)
 - `PUT http://<unit-ip>/api?m=<token>` - direct status reads and commands to each indoor unit's WiFi adapter (no cloud)
@@ -299,6 +309,19 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 - Check your internet connection
 - Verify devices are online in the Kumo Cloud app
 - Check Homebridge logs for API errors
+
+### A unit shows "No Response"
+
+The cloud reported that unit's Wi-Fi adapter as disconnected, and it isn't reachable over the LAN, so the plugin won't show its last (stale) reading as if it were live. Check that the unit appears online in the Comfort app. A hung adapter can come back after power-cycling the indoor unit at its breaker. One that doesn't may need its Wi-Fi set up again in the app, and if that fails too, Mitsubishi support or your installer.
+
+### Local control isn't working for a unit
+
+The log says why, once per unit, after discovery:
+
+- `rejected its local credential`: the unit is on your network but the credential the plugin has for it is out of date. There's no known way to refresh it (see [Local LAN Control](#local-lan-control)). The unit uses the cloud.
+- `didn't answer the local probe`: the unit is on your network but didn't respond in time. The plugin retries a couple of times, a minute apart; after that, restarting the plugin tries again.
+- `could not be reached or authenticated locally`: the plugin couldn't find the unit on the LAN. Check that it's on the same subnet, or list it in `localControlIps`.
+- `Legacy v2 credential source returned HTTP 500`: your account has no pre-Comfort-app record, so no local credentials are available.
 
 ### Temperature not updating
 
