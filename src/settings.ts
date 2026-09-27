@@ -39,7 +39,8 @@ export interface KumoConfig {
   mirror?: MirrorPair[];
   // ---- HomeKit display options (2.0) ----
   // Dry and fan-only have no HeaterCooler mode, so each is a separate Switch on units
-  // whose profile supports it. ON by default: they're the only controls whose
+  // whose profile supports it. Shown by default (their on/off follows the unit's
+  // real mode; the plugin never turns them on): they're the only controls whose
   // automations survive the 2.0 move from Thermostat to HeaterCooler. Set false to hide.
   showDrySwitch?: boolean;
   showFanOnlySwitch?: boolean;

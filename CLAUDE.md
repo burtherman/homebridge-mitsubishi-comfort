@@ -159,7 +159,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `localPollInterval` - Seconds between local status polls when `localControl` is on (default: 15, min: 5, max: 120)
 - `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
 - `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
-- `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). The fork defaulted them off; ours stay on because they're the only HomeKit controls whose automations survive the Thermostat → HeaterCooler move.
+- `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). "Shown", not "on": each switch's state follows the unit's real mode. The fork hid them by default; ours stay shown because they're the only HomeKit controls whose automations survive the Thermostat → HeaterCooler move.
 - `showHumiditySensor` - (2.0) Humidity as a `HumiditySensor` service (default true). Off also removes a cached one.
 
 ## HomeKit Characteristics Mapping (2.0: HeaterCooler)

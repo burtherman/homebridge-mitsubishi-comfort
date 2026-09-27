@@ -42,7 +42,8 @@ install that's one automation (the roof skylight opening turns off all units).
    `previousOperationMode` is overwritten with the current mode on every update (fork 842, 948).
    Track the last active mode in accessory context; use it for power-on and for the target shown
    while off. Send power + mode as one command so a scene can't race them.
-3. **Dry and Fan switches stay ON by default** (opt-out). The fork made them opt-in
+3. **Dry and Fan switches stay shown by default** (hide via config; their on/off state always
+   follows the unit's real mode). The fork made them opt-in
    (`=== true`, fork 558-571), which would delete them on upgrade. They're the only automations
    that survive the service change.
 4. **Vane controls only on units whose profile reports `hasVaneDir`/`hasVaneSwing`.** The owner's

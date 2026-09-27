@@ -276,7 +276,7 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
     // Dry and fan-only have no HeaterCooler mode, so each stays a Switch on units
-    // that support it. On by default (opt-out via config): they're the only
+    // that support it. Shown by default (hide via config): they're the only
     // controls whose HomeKit automations survive the move from Thermostat.
     if (profile.hasModeVent && this.platform.kumoConfig?.showFanOnlySwitch !== false) {
       this.setupFanOnlySwitch();
