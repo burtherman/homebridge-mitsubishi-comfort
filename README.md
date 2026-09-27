@@ -310,7 +310,9 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 Apache License 2.0
 
-Copyright 2024
+Copyright 2025-2026 Burt Herman
+
+See [LICENSE](LICENSE) for the full text.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
