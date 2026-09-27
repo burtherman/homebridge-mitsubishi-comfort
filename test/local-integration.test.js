@@ -21,12 +21,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } };
@@ -109,7 +104,7 @@ test('updateFromLocal feeds a locally-read status into the characteristics', asy
   handler.updateFromLocal(localStatus({ roomTemp: 24, operationMode: 'cool', spCool: 23 }));
 
   assert.strictEqual(await handler.getCurrentTemperature(), 24);
-  assert.strictEqual(await handler.getTargetTemperature(), 23, 'cool mode surfaces spCool');
+  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 23, 'cool mode surfaces spCool');
 });
 
 // ---- local authoritative --------------------------------------------------
@@ -136,9 +131,9 @@ test('commands prefer the local path when a unit is locally reachable', async ()
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setTargetTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.3);
 
-  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: 22 }], 'sent locally');
+  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: 22.3 }], 'sent locally');
   assert.strictEqual(sendCommandCalls.length, 0, 'cloud not used');
 });
 
@@ -147,10 +142,10 @@ test('a failed local command falls back to the cloud', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setTargetTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.3);
 
   assert.strictEqual(local.calls.length, 1, 'local attempted first');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22 }], 'then cloud');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }], 'then cloud');
 });
 
 test('commands skip local when the unit is not locally reachable', async () => {
@@ -158,8 +153,8 @@ test('commands skip local when the unit is not locally reachable', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setTargetTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.3);
 
   assert.strictEqual(local.calls.length, 0, 'local not attempted');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22 }], 'cloud used');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }], 'cloud used');
 });

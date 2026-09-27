@@ -27,12 +27,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = {
@@ -114,8 +109,8 @@ function makeHarness({ log = makeLog(), localSerials = [], withHap = true } = {}
   };
   const accessory = makeAccessory();
   const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  const thermostat = accessory.getService(Service.Thermostat);
-  return { handler, accessory, platform, thermostat, sent };
+  const tile = accessory.getService(Service.HeaterCooler);
+  return { handler, accessory, platform, tile, sent };
 }
 
 const zone = (over = {}) => ({
@@ -133,50 +128,53 @@ async function assertRejects(fn, message) {
 }
 
 test('an adapter the cloud reports offline goes No Response instead of serving stale state', async () => {
-  const { handler, thermostat } = makeHarness();
+  const { handler, tile } = makeHarness();
   handler.updateFromZone(zone());
 
   // Baseline: reachable, real values published.
-  assert.strictEqual(thermostat.getCharacteristic(Characteristic.CurrentTemperature).value, 26.5);
+  assert.strictEqual(tile.getCharacteristic(Characteristic.CurrentTemperature).value, 26.5);
   assert.strictEqual(await handler.getCurrentTemperature(), 26.5);
 
   handler.setCloudConnected(false);
 
   assert.strictEqual(handler.isReachable(), false);
   await assertRejects(() => handler.getCurrentTemperature(), 'getter throws while unreachable');
-  await assertRejects(() => handler.getTargetHeatingCoolingState(), 'mode getter throws too');
+  await assertRejects(() => handler.getTargetHeaterCoolerState(), 'mode getter throws too');
 
   // The error is pushed immediately rather than waiting for HomeKit to read.
-  const pushed = thermostat.getCharacteristic(Characteristic.CurrentHeatingCoolingState).value;
+  const pushed = tile.getCharacteristic(Characteristic.CurrentHeaterCoolerState).value;
   assert.ok(pushed instanceof Error, 'No Response pushed to the characteristic');
+  for (const key of ['Active', 'TargetHeaterCoolerState', 'HeatingThresholdTemperature', 'CoolingThresholdTemperature']) {
+    assert.ok(tile.getCharacteristic(Characteristic[key]).value instanceof Error, `${key} pushed No Response too`);
+  }
   assert.strictEqual(pushed.hapStatus, hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
 });
 
 test('a stale shadow replay does NOT repaint the tile while the adapter is offline', async () => {
   // This is the exact 2026-09-10 failure: the unit was physically OFF but the cloud
   // kept replaying `cool, power=1`. That must not reach HomeKit as if it were live.
-  const { handler, thermostat } = makeHarness();
+  const { handler, tile } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
   handler.setCloudConnected(false);
 
   handler.updateFromZone(zone({ operationMode: 'cool', power: 1, roomTemp: 26.5 }));
 
-  const current = thermostat.getCharacteristic(Characteristic.CurrentHeatingCoolingState).value;
+  const current = tile.getCharacteristic(Characteristic.CurrentHeaterCoolerState).value;
   assert.ok(current instanceof Error, 'stale replay left the tile in No Response, not "Cooling"');
 });
 
 test('recovery republishes real state and clears No Response', async () => {
-  const { handler, thermostat } = makeHarness();
+  const { handler, tile } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
   handler.setCloudConnected(false);
-  assert.ok(thermostat.getCharacteristic(Characteristic.CurrentHeatingCoolingState).value instanceof Error);
+  assert.ok(tile.getCharacteristic(Characteristic.CurrentHeaterCoolerState).value instanceof Error);
 
   handler.setCloudConnected(true);
 
   assert.strictEqual(handler.isReachable(), true);
-  const current = thermostat.getCharacteristic(Characteristic.CurrentHeatingCoolingState).value;
+  const current = tile.getCharacteristic(Characteristic.CurrentHeaterCoolerState).value;
   assert.ok(!(current instanceof Error), 'characteristic no longer an error');
-  assert.strictEqual(current, Characteristic.CurrentHeatingCoolingState.OFF);
+  assert.strictEqual(current, Characteristic.CurrentHeaterCoolerState.INACTIVE);
   assert.strictEqual(await handler.getCurrentTemperature(), 26.5, 'getters serve values again');
 });
 
@@ -199,8 +197,9 @@ test('writes fail loudly against an offline adapter instead of reporting success
   handler.updateFromZone(zone());
   handler.setCloudConnected(false);
 
-  await assertRejects(() => handler.setTargetHeatingCoolingState(0), 'mode write rejected');
-  await assertRejects(() => handler.setTargetTemperature(22), 'setpoint write rejected');
+  await assertRejects(() => handler.setActive(0), 'power write rejected');
+  await assertRejects(() => handler.setTargetHeaterCoolerState(2), 'mode write rejected');
+  await assertRejects(() => handler.setCoolingThresholdTemperature(22.3), 'setpoint write rejected');
   assert.strictEqual(sent.length, 0, 'nothing was sent to an adapter known to be offline');
 });
 

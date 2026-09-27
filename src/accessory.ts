@@ -2,18 +2,26 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState } from './settings';
+import { cToF, quantizeSetpointInRange } from './temperature';
+
+// HeaterCooler implementation (2.0): portions derived from
+// homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0, src/accessory.ts @ 83dfd18),
+// modified. See NOTICE and docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md.
 
 /**
  * Where a command we sent came from. Logged with every send so "who changed this
  * unit?" is answerable from the log alone.
  */
 export type CommandOrigin =
+  | 'homekit:active'
   | 'homekit:mode'
-  | 'homekit:temp'
   | 'homekit:threshold'
   | 'homekit:fan-switch'
   | 'homekit:dry-switch'
   | 'mirror';
+
+type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
+type SetpointField = 'spHeat' | 'spCool';
 
 /**
  * Collapse power + operationMode into the one label that matters for "is it on,
@@ -53,12 +61,30 @@ export class KumoThermostatAccessory {
   private filterMaintenanceService: Service | null = null;
   private fanOnlyService: Service | null = null;
   private dryService: Service | null = null;
+  private humidityService: Service | null = null;
   private modelNumberSet: boolean = false;
+
+  // Power and mode writes arriving in one HomeKit request, combined into one command.
+  // hap-nodejs dispatches every handler in a write request concurrently without
+  // awaiting any of them, so a scene's Active=1 and TargetHeaterCoolerState=COOL
+  // land in arbitrary order. Sent separately, the power-on picked a mode of its own
+  // and raced the explicit one. Buffering to the next tick makes the burst one
+  // intent. See queuePowerMode.
+  private pendingPowerMode: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' } | null = null;
+  private powerModeFlush: Promise<void> | null = null;
+  // Setpoints HomeKit wrote while the unit was off, which can't be sent on their own
+  // (the API 400s a bare setpoint on an off unit). A scene that turns a unit on with
+  // "cool, 72" delivers the 72 while the unit is still off; if it arrived in the same
+  // burst as the power-on it rides along in that command. Anything older is left
+  // out: an "AC off" scene re-sends stale captured setpoints, and applying those at
+  // the next power-on is the 1.8.2 bug.
+  private readonly setpointsCachedWhileOff: Map<SetpointField, { value: number; at: number }> = new Map();
+  private readonly SAME_BURST_MS = 1000;
   // Timestamp (ms) of the most recent HomeKit "off" request. Within
   // OFF_SUPPRESS_WINDOW_MS of it, setpoint writes are suppressed (cached + echoed
-  // but not sent). An "AC off" scene captures each thermostat's full state and
-  // re-pushes its setpoints (TargetTemperature, and for an AUTO unit the two
-  // threshold handles) alongside OFF; HomeKit dispatches them concurrently in an
+  // but not sent). An "AC off" scene captures each unit's full state and
+  // re-pushes its setpoints (the two threshold handles) and mode alongside
+  // Active=0; HomeKit dispatches them concurrently in an
   // arbitrary order. A setpoint landing after the off reaches the LAN adapter as
   // a bare, mode-less write (local commands carry no power field — see
   // local-api.ts) and powers the unit back on. The unit is being turned off —
@@ -111,57 +137,59 @@ export class KumoThermostatAccessory {
       .setCharacteristic(this.platform.Characteristic.Model, 'Kumo Cloud Heat Pump')
       .setCharacteristic(this.platform.Characteristic.SerialNumber, this.deviceSerial);
 
-    this.service = this.accessory.getService(this.platform.Service.Thermostat) ||
-      this.accessory.addService(this.platform.Service.Thermostat);
+    // A ductless mini-split is a HeaterCooler, not a Thermostat: power (`Active`) is
+    // separate from the heat/cool/auto mode, and the current state has a real IDLE.
+    // Accessories cached by 1.x carry a Thermostat service. Remove it, or the unit
+    // shows two competing climate tiles. HomeKit automations bound to the old
+    // thermostat controls stop working and must be recreated (the Dry/Fan switches
+    // keep their subtypes, so automations on those survive).
+    const staleThermostat = this.accessory.getService(this.platform.Service.Thermostat);
+    if (staleThermostat) {
+      this.accessory.removeService(staleThermostat);
+      this.platform.log.info(
+        `${accessory.context.device.displayName}: migrated Thermostat -> HeaterCooler. ` +
+        'HomeKit automations and scenes that controlled this thermostat must be recreated.',
+      );
+    }
+
+    this.service = this.accessory.getService(this.platform.Service.HeaterCooler) ||
+      this.accessory.addService(this.platform.Service.HeaterCooler);
 
     this.service.setCharacteristic(
       this.platform.Characteristic.Name,
       accessory.context.device.displayName,
     );
 
-    // Register handlers for required characteristics
-    this.service.getCharacteristic(this.platform.Characteristic.CurrentHeatingCoolingState)
-      .onGet(this.getCurrentHeatingCoolingState.bind(this));
+    this.service.getCharacteristic(this.platform.Characteristic.Active)
+      .onGet(this.getActive.bind(this))
+      .onSet(this.setActive.bind(this));
 
-    this.service.getCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState)
-      .onGet(this.getTargetHeatingCoolingState.bind(this))
-      .onSet(this.setTargetHeatingCoolingState.bind(this));
+    this.service.getCharacteristic(this.platform.Characteristic.CurrentHeaterCoolerState)
+      .onGet(this.getCurrentHeaterCoolerState.bind(this));
+
+    this.service.getCharacteristic(this.platform.Characteristic.TargetHeaterCoolerState)
+      .onGet(this.getTargetHeaterCoolerState.bind(this))
+      .onSet(this.setTargetHeaterCoolerState.bind(this));
 
     this.service.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
       .onGet(this.getCurrentTemperature.bind(this));
 
-    this.service.getCharacteristic(this.platform.Characteristic.TargetTemperature)
-      .onGet(this.getTargetTemperature.bind(this))
-      .onSet(this.setTargetTemperature.bind(this));
-
-    // AUTO-mode dual setpoints. HomeKit's Thermostat surfaces a temperature
-    // *range* (two handles) when TargetHeatingCoolingState === AUTO and these
-    // optional characteristics are present: HeatingThreshold = the low/heat bound
-    // (spHeat), CoolingThreshold = the high/cool bound (spCool). Calling
-    // getCharacteristic adds them to the service; doing it here (during discovery,
-    // before the accessory is (re)published) means they reach HomeKit without a
-    // separate publishStructureChange. Outside AUTO the Home app ignores them and
-    // shows the single TargetTemperature. These units report spAuto: null and use
-    // the spHeat/spCool band for auto — verified against live device data.
-    // minStep 0.1, not 0.5: HomeKit is Celsius-native and the Home app converts
-    // to °F for display. A 0.5°C step forces "72°F" to snap to 22.5°C, which reads
-    // back as 72.5°F → the Kumo app shows 73°F (the long-standing app-vs-HomeKit
-    // mismatch). 0.1°C lets HomeKit store 72°F as ~22.2°C, which round-trips to
-    // 72°F in both apps. Live-verified the units honor 0.1°C (the cloud stored a
-    // 23.3 setpoint exactly, never snapping to 23.5).
-    const wideThresholdProps = { minValue: 10, maxValue: 35, minStep: 0.1 };
+    // On HeaterCooler the two thresholds ARE the setpoint controls in every mode:
+    // the Home app shows the heating threshold in HEAT, the cooling threshold in COOL
+    // and both as a range in AUTO. HeatingThreshold = spHeat, CoolingThreshold =
+    // spCool (these units report spAuto: null and use the band for auto). There's no
+    // TargetTemperature writing both from one value, so a scene can't collapse the
+    // AUTO band. minStep 0.1 because writes are snapped to the whole-°F grid (see
+    // quantize and src/temperature.ts); HAP applies minStep only outbound.
+    this.setThresholdRange('spHeat', 10, 35);
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
-      .setProps(wideThresholdProps)
       .onGet(this.getHeatingThresholdTemperature.bind(this))
       .onSet(this.setHeatingThresholdTemperature.bind(this));
 
+    this.setThresholdRange('spCool', 10, 35);
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
-      .setProps(wideThresholdProps)
       .onGet(this.getCoolingThresholdTemperature.bind(this))
       .onSet(this.setCoolingThresholdTemperature.bind(this));
-
-    // Note: TemperatureDisplayUnits characteristic is not exposed since the temperature
-    // unit preference is account-wide in Kumo Cloud, not per-device
 
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
@@ -192,6 +220,18 @@ export class KumoThermostatAccessory {
         .onSet(this.setDryOn.bind(this));
     }
 
+    // A cached HumiditySensor needs its handler now, not when the first humidity
+    // reading arrives, or HomeKit reads a default until then.
+    const cachedHumidity = this.accessory.getService(this.platform.Service.HumiditySensor);
+    if (cachedHumidity) {
+      if (this.platform.kumoConfig?.showHumiditySensor === false) {
+        this.accessory.removeService(cachedHumidity);
+      } else {
+        this.hasHumiditySensor = true;
+        this.setupHumidityService();
+      }
+    }
+
     // Register for streaming updates
     this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
     this.platform.log.debug(`Registered streaming callback for ${this.deviceSerial}`);
@@ -208,60 +248,79 @@ export class KumoThermostatAccessory {
   private applyDeviceProfile(profile: DeviceProfile): void {
     this.deviceProfile = profile;
 
-    // Calculate broadest valid temperature range across all modes
-    const minTemp = Math.min(
-      profile.minimumSetPoints.cool,
-      profile.minimumSetPoints.heat,
-      profile.minimumSetPoints.auto,
-    );
-    const maxTemp = Math.max(
-      profile.maximumSetPoints.cool,
-      profile.maximumSetPoints.heat,
-      profile.maximumSetPoints.auto,
-    );
-
-    this.service.getCharacteristic(this.platform.Characteristic.TargetTemperature)
-      .setProps({
-        minValue: minTemp,
-        maxValue: maxTemp,
-        minStep: 0.1, // 0.1°C for faithful °F round-tripping — see constructor note
-      });
-
-    // Constrain the AUTO band handles to the same supported range so neither the
-    // heating nor cooling threshold can be dragged outside the unit's limits.
-    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
-      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.1 });
-    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
-      .setProps({ minValue: minTemp, maxValue: maxTemp, minStep: 0.1 });
+    // Each threshold gets the range of the mode it drives, widened to the auto range
+    // because both are live in AUTO. 1.x applied one range (the union of all modes)
+    // to every setpoint, so COOL offered values from the HEAT range and the unit
+    // answered `invalidSpCoolRange`. These limits are installer settings in the unit,
+    // reported read-only; the cloud enforces them independently.
+    const { heatMin, heatMax, coolMin, coolMax } = this.setpointRanges(profile);
+    this.setThresholdRange('spHeat', heatMin, heatMax);
+    this.setThresholdRange('spCool', coolMin, coolMax);
 
     // Only log when the range actually changes. profile_update is a ~15-min
     // heartbeat carrying the same limits every time; logging it each tick just
     // fills the log (observed: 5 units × 4/hr = a wall of identical lines).
-    const rangeKey = `${minTemp}-${maxTemp}`;
+    const rangeKey = `${heatMin}-${heatMax}/${coolMin}-${coolMax}`;
     if (rangeKey !== this.lastLoggedRange) {
       this.lastLoggedRange = rangeKey;
-      const minTempF = (minTemp * 9 / 5) + 32;
-      const maxTempF = (maxTemp * 9 / 5) + 32;
       this.platform.log.info(
-        `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
+        `${this.accessory.displayName}: setpoint range heat ${heatMin}-${heatMax}°C ` +
+        `(${cToF(heatMin).toFixed(0)}-${cToF(heatMax).toFixed(0)}°F), ` +
+        `cool ${coolMin}-${coolMax}°C (${cToF(coolMin).toFixed(0)}-${cToF(coolMax).toFixed(0)}°F)`,
       );
     }
 
-    // Add / remove the fan-only switch based on device capability
-    if (profile.hasModeVent) {
+    // Offer only the modes the unit can do. AUTO needs both directions.
+    const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    const modes: number[] = profile.hasModeHeat ? [T.AUTO, T.HEAT, T.COOL] : [T.COOL];
+    this.service.getCharacteristic(T).setProps({ validValues: modes });
+
+    // Dry and fan-only have no HeaterCooler mode, so each stays a Switch on units
+    // that support it. On by default (opt-out via config): they're the only
+    // controls whose HomeKit automations survive the move from Thermostat.
+    if (profile.hasModeVent && this.platform.kumoConfig?.showFanOnlySwitch !== false) {
       this.setupFanOnlySwitch();
     } else {
       this.removeFanOnlySwitch();
     }
 
-    // Add / remove the dry switch based on device capability. HomeKit's
-    // Thermostat can't represent dehumidify, so — exactly like fan-only —
-    // dry is surfaced as a separate Switch.
-    if (profile.hasModeDry) {
+    if (profile.hasModeDry && this.platform.kumoConfig?.showDrySwitch !== false) {
       this.setupDrySwitch();
     } else {
       this.removeDrySwitch();
     }
+  }
+
+  /**
+   * Set a threshold's range, first moving its current value inside it. HAP starts
+   * the characteristics at its own default (0 for the heating threshold) and warns
+   * whenever a range excludes the current value.
+   */
+  private setThresholdRange(field: SetpointField, min: number, max: number): void {
+    const C = this.platform.Characteristic;
+    const char = field === 'spHeat' ? C.HeatingThresholdTemperature : C.CoolingThresholdTemperature;
+    const current = this.service.getCharacteristic(char).value;
+    if (typeof current !== 'number' || current < min || current > max) {
+      const fallback = field === 'spHeat' ? 20 : 24;
+      const inside = typeof current === 'number' ? Math.min(Math.max(current, min), max) : fallback;
+      this.service.updateCharacteristic(char, inside);
+    }
+    this.service.getCharacteristic(char).setProps({ minValue: min, maxValue: max, minStep: 0.1 });
+  }
+
+  /** Per-threshold setpoint limits: each mode's own range, widened to the auto range. */
+  private setpointRanges(profile: DeviceProfile | null): {
+    heatMin: number; heatMax: number; coolMin: number; coolMax: number;
+  } {
+    if (!profile) {
+      return { heatMin: 10, heatMax: 35, coolMin: 10, coolMax: 35 };
+    }
+    return {
+      heatMin: Math.min(profile.minimumSetPoints.heat, profile.minimumSetPoints.auto),
+      heatMax: Math.max(profile.maximumSetPoints.heat, profile.maximumSetPoints.auto),
+      coolMin: Math.min(profile.minimumSetPoints.cool, profile.minimumSetPoints.auto),
+      coolMax: Math.max(profile.maximumSetPoints.cool, profile.maximumSetPoints.auto),
+    };
   }
 
   /**
@@ -365,20 +424,12 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[FAN ONLY] ${this.accessory.displayName}: Command accepted by API`);
 
-    // Optimistic local-state update so the thermostat tile reflects the change
-    // immediately, and so the Target state matches what the next poll will report —
-    // vent now maps to COOL, not OFF (same rationale as dry above).
+    // Optimistic local-state update so the climate tile reflects the change now.
     if (this.currentStatus) {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentHeatingCoolingState,
-        this.mapToCurrentHeatingCoolingState(this.currentStatus),
-      );
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetHeatingCoolingState,
-        this.mapToTargetHeatingCoolingState(this.currentStatus),
-      );
+      this.rememberActiveMode(this.currentStatus);
+      this.refreshClimateCharacteristics();
     }
 
     // Fan-only and dry are mutually exclusive — engaging fan-only means the
@@ -481,21 +532,12 @@ export class KumoThermostatAccessory {
 
     this.platform.log.info(`[DRY] ${this.accessory.displayName}: Command accepted by API`);
 
-    // Optimistic local-state update so the thermostat tile reflects the change
-    // immediately, and (critically) so the Target state matches what the next poll
-    // will report — dry now maps to COOL, not OFF. Leaving Target at OFF here would
-    // let an off-automation firing before the next poll be suppressed again.
+    // Optimistic local-state update so the climate tile reflects the change now.
     if (this.currentStatus) {
       this.currentStatus.operationMode = operationMode;
       this.currentStatus.power = on ? 1 : 0;
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentHeatingCoolingState,
-        this.mapToCurrentHeatingCoolingState(this.currentStatus),
-      );
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetHeatingCoolingState,
-        this.mapToTargetHeatingCoolingState(this.currentStatus),
-      );
+      this.rememberActiveMode(this.currentStatus);
+      this.refreshClimateCharacteristics();
     }
 
     // Fan-only and dry are mutually exclusive — engaging dry means the unit is
@@ -513,6 +555,7 @@ export class KumoThermostatAccessory {
       this.filterMaintenanceService =
         this.accessory.getService(this.platform.Service.FilterMaintenance) ||
         this.accessory.addService(this.platform.Service.FilterMaintenance);
+      this.linkSecondaryService(this.filterMaintenanceService);
       this.publishStructureChange();
       this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
     }
@@ -523,6 +566,49 @@ export class KumoThermostatAccessory {
         ? this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER
         : this.platform.Characteristic.FilterChangeIndication.FILTER_OK,
     );
+  }
+
+  /**
+   * Indoor humidity as its own HumiditySensor service: HeaterCooler has no
+   * CurrentRelativeHumidity characteristic. Created on the first reading from a
+   * unit that has a sensor (or adopted from the cache in the constructor).
+   */
+  private setupHumidityService(): void {
+    if (this.humidityService) {
+      return;
+    }
+    const existing = this.accessory.getService(this.platform.Service.HumiditySensor);
+    const name = `${this.accessory.context.device.displayName} Humidity`;
+    this.humidityService =
+      existing || this.accessory.addService(this.platform.Service.HumiditySensor, name);
+    this.humidityService.setCharacteristic(this.platform.Characteristic.Name, name);
+    this.humidityService.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
+      .onGet(this.getCurrentRelativeHumidity.bind(this));
+    this.linkSecondaryService(this.humidityService);
+    if (!existing) {
+      this.publishStructureChange();
+    }
+  }
+
+  /**
+   * Mark the HeaterCooler primary and link a secondary service to it, so the Home
+   * app groups them on one tile. Guarded: a bare test stub has neither method, and a
+   * throw here during construction would take out the whole accessory.
+   */
+  private linkSecondaryService(secondary: Service | null): void {
+    if (!secondary) {
+      return;
+    }
+    const primary = this.service as unknown as {
+      setPrimaryService?: (v?: boolean) => void;
+      addLinkedService?: (s: Service) => void;
+    };
+    if (typeof primary.setPrimaryService === 'function') {
+      primary.setPrimaryService(true);
+    }
+    if (typeof primary.addLinkedService === 'function') {
+      primary.addLinkedService(secondary);
+    }
   }
 
   // Handle streaming updates
@@ -549,7 +635,8 @@ export class KumoThermostatAccessory {
         humidity: data.humidity ?? null,
         power: data.power!,
         operationMode: data.operationMode!,
-        previousOperationMode: data.operationMode!,
+        // The cloud's own memory of the last mode; seeds power-on (seedActiveMode).
+        previousOperationMode: (data as { previousOperationMode?: string }).previousOperationMode || data.operationMode!,
         // Unknown stays unknown: processZoneUpdate carries the last known value.
         fanSpeed: data.fanSpeed || undefined,
         airDirection: data.airDirection || undefined,
@@ -587,6 +674,11 @@ export class KumoThermostatAccessory {
 
       // Update filter maintenance service
       this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+      // standby arrives here, after processZoneUpdate published the tile, so
+      // republish or IDLE shows one update late.
+      if (this.isReachable()) {
+        this.refreshClimateCharacteristics();
+      }
     }
   }
 
@@ -716,13 +808,16 @@ export class KumoThermostatAccessory {
     const err = this.unreachableError();
     const C = this.platform.Characteristic;
     for (const characteristic of [
-      C.CurrentHeatingCoolingState,
-      C.TargetHeatingCoolingState,
+      C.Active,
+      C.CurrentHeaterCoolerState,
+      C.TargetHeaterCoolerState,
       C.CurrentTemperature,
-      C.TargetTemperature,
+      C.HeatingThresholdTemperature,
+      C.CoolingThresholdTemperature,
     ]) {
       this.service.updateCharacteristic(characteristic, err as never);
     }
+    this.humidityService?.updateCharacteristic(C.CurrentRelativeHumidity, err as never);
     this.fanOnlyService?.updateCharacteristic(C.On, err as never);
     this.dryService?.updateCharacteristic(C.On, err as never);
   }
@@ -733,16 +828,13 @@ export class KumoThermostatAccessory {
       return;
     }
     const C = this.platform.Characteristic;
-    this.service.updateCharacteristic(
-      C.CurrentHeatingCoolingState, this.mapToCurrentHeatingCoolingState(this.currentStatus));
-    this.service.updateCharacteristic(
-      C.TargetHeatingCoolingState, this.mapToTargetHeatingCoolingState(this.currentStatus));
+    this.refreshClimateCharacteristics();
     if (typeof this.currentStatus.roomTemp === 'number' && !isNaN(this.currentStatus.roomTemp)) {
       this.service.updateCharacteristic(C.CurrentTemperature, this.currentStatus.roomTemp);
     }
-    const targetTemp = this.getTargetTempFromStatus(this.currentStatus);
-    if (!isNaN(targetTemp)) {
-      this.service.updateCharacteristic(C.TargetTemperature, targetTemp);
+    this.refreshThresholds(this.currentStatus);
+    if (this.humidityService && typeof this.currentStatus.humidity === 'number') {
+      this.humidityService.updateCharacteristic(C.CurrentRelativeHumidity, this.currentStatus.humidity);
     }
     this.fanOnlyService?.updateCharacteristic(C.On, this.isFanOnlyActive(this.currentStatus));
     this.dryService?.updateCharacteristic(C.On, this.isDryActive(this.currentStatus));
@@ -803,6 +895,10 @@ export class KumoThermostatAccessory {
         this.currentStatus.standby = status.standby;
       }
       this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+      // Same as the streaming path: standby lands after the tile was published.
+      if (this.isReachable()) {
+        this.refreshClimateCharacteristics();
+      }
     }
   }
 
@@ -899,13 +995,11 @@ export class KumoThermostatAccessory {
 
       // Check if device has humidity sensor and register characteristic if needed
       const hasHumidity = zone.adapter.humidity !== null && zone.adapter.humidity !== undefined;
-      if (hasHumidity && !this.hasHumiditySensor) {
-        // Device has humidity sensor - add the characteristic
+      if (hasHumidity && !this.hasHumiditySensor && this.platform.kumoConfig?.showHumiditySensor !== false) {
+        // Device has a humidity sensor: add the HumiditySensor service.
         this.hasHumiditySensor = true;
-        this.service.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
-          .onGet(this.getCurrentRelativeHumidity.bind(this));
-        this.publishStructureChange();
-        this.platform.log.debug(`Added humidity characteristic for device ${this.deviceSerial}`);
+        this.setupHumidityService();
+        this.platform.log.debug(`Added humidity sensor for device ${this.deviceSerial}`);
       }
       // Note: Once humidity is detected, we never remove the characteristic.
       // Streaming updates may intermittently omit humidity data, but that doesn't
@@ -981,7 +1075,7 @@ export class KumoThermostatAccessory {
 
       this.currentStatus = status;
       this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
-      this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (target: ${this.getTargetTempFromStatus(status)}°C, mode: ${status.operationMode})`);
+      this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (heat ${status.spHeat}°C / cool ${status.spCool}°C, mode: ${status.operationMode})`);
 
       // A unit whose adapter is offline has no live state to publish — anything
       // arriving now is the cloud replaying its frozen shadow record. Keep the
@@ -994,16 +1088,13 @@ export class KumoThermostatAccessory {
         return;
       }
 
-      // Update all characteristics
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentHeatingCoolingState,
-        this.mapToCurrentHeatingCoolingState(status),
-      );
+      // A live, active reading is what power-on restores (see rememberActiveMode).
+      // After the reachability check: a frozen shadow replay must not overwrite it.
+      this.rememberActiveMode(status);
+      this.seedActiveMode(zone.adapter.previousOperationMode);
 
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetHeatingCoolingState,
-        this.mapToTargetHeatingCoolingState(status),
-      );
+      // Update all characteristics
+      this.refreshClimateCharacteristics();
 
       // Only update temperature if valid
       if (status.roomTemp !== undefined && status.roomTemp !== null && !isNaN(status.roomTemp)) {
@@ -1013,39 +1104,13 @@ export class KumoThermostatAccessory {
         );
       }
 
-      const targetTemp = this.getTargetTempFromStatus(status);
-      if (targetTemp !== undefined && targetTemp !== null && !isNaN(targetTemp)) {
-        // Log temperature returned from API for comparison
-        const targetTempF = (targetTemp * 9/5) + 32;
-        this.platform.log.debug(`[TEMP UPDATE] ${this.accessory.displayName}: API returned target ${targetTemp.toFixed(3)}°C (${targetTempF.toFixed(1)}°F) [mode: ${status.operationMode}]`);
-
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.TargetTemperature,
-          targetTemp,
-        );
-      }
-
-      // Keep the AUTO-mode threshold characteristics in sync with the live band.
-      // The Home app only surfaces these in AUTO; refreshing them in any mode is
-      // harmless (each is independent within its own min/max props, so a unit
-      // sitting in heat/cool with an inverted spHeat>spCool pair never trips a
-      // HomeKit constraint — the values just aren't shown until AUTO is selected).
-      if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.HeatingThresholdTemperature,
-          status.spHeat,
-        );
-      }
-      if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
-        this.service.updateCharacteristic(
-          this.platform.Characteristic.CoolingThresholdTemperature,
-          status.spCool,
-        );
-      }
+      // Both thresholds, every update: on HeaterCooler they're the setpoints in every
+      // mode (heat shows spHeat, cool shows spCool, auto shows the band).
+      this.refreshThresholds(status);
 
       // Only update humidity if the device has a humidity sensor
-      if (this.hasHumiditySensor && status.humidity !== null) {
-        this.service.updateCharacteristic(
+      if (this.hasHumiditySensor && status.humidity !== null && status.humidity !== undefined) {
+        this.humidityService?.updateCharacteristic(
           this.platform.Characteristic.CurrentRelativeHumidity,
           status.humidity,
         );
@@ -1075,94 +1140,155 @@ export class KumoThermostatAccessory {
     }
   }
 
-  private mapToCurrentHeatingCoolingState(status: DeviceStatus): number {
-    // If power is off, always return OFF
-    if (status.power === 0) {
-      return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
-    }
+  /** On/off. HeaterCooler splits this out from the mode, unlike Thermostat. */
+  private mapToActive(status: DeviceStatus): number {
+    const C = this.platform.Characteristic;
+    return status.power === 1 && status.operationMode !== 'off' ? C.Active.ACTIVE : C.Active.INACTIVE;
+  }
 
-    // Map operation mode to HomeKit state
+  /**
+   * What the unit is doing right now. HeaterCooler has a real IDLE, so a compressor
+   * in standby and fan-only can be reported honestly instead of dressed up as COOL.
+   * That retires the 1.7.1 dry/vent -> COOL workaround: it existed only because the
+   * Thermostat's OFF meant both "not running" and "powered down", so iOS suppressed
+   * an off-scene write as redundant. Here power is `Active`, a separate
+   * characteristic, so a scene turning the unit off is always a real 1 -> 0.
+   */
+  private mapToCurrentHeaterCoolerState(status: DeviceStatus): number {
+    const C = this.platform.Characteristic.CurrentHeaterCoolerState;
+    if (status.power === 0 || status.operationMode === 'off') {
+      return C.INACTIVE;
+    }
+    if (status.standby === true) {
+      return C.IDLE; // on and holding its setpoint, compressor resting
+    }
     switch (status.operationMode) {
       case 'heat':
-        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-      case 'cool':
-        return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
       case 'autoHeat':
-        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
+        return C.HEATING;
+      case 'cool':
       case 'autoCool':
-        return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'auto': {
-        // Plain auto mode — infer from temperature comparison, default to HEAT when at target
-        const targetTemp = this.getTargetTempFromStatus(status);
-        if (status.roomTemp > targetTemp) {
-          return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-        }
-        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-      }
-      case 'dry':
+      case 'dry': // dehumidify runs the compressor with the coil cold
+        return C.COOLING;
       case 'vent':
-        // Report COOL (not OFF) so a running dry/fan-only unit shows as on
-        // ("Cooling") in the Home app rather than a misleading "Off" — the tile's
-        // status label follows this characteristic, and the Dry/Fan switches may be
-        // invisible on already-paired accessories. Pairs with the same dry/vent →
-        // COOL choice in mapToTargetHeatingCoolingState.
-        return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'off':
+        return C.IDLE; // fan only: on, moving air, neither heating nor cooling
+      case 'auto': {
+        // Plain 'auto' without the unit saying which way it went: infer from the band.
+        const heat = this.validSetpoint(status.spHeat) ?? 20;
+        const cool = this.validSetpoint(status.spCool) ?? 24;
+        if (status.roomTemp > cool) {
+          return C.COOLING;
+        }
+        if (status.roomTemp < heat) {
+          return C.HEATING;
+        }
+        return C.IDLE;
+      }
       default:
-        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
+        return C.INACTIVE;
     }
   }
 
-  private mapToTargetHeatingCoolingState(status: DeviceStatus): number {
-    // If power is off, return OFF
-    if (status.power === 0 || status.operationMode === 'off') {
-      return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
-    }
-
-    // Map operation mode to HomeKit state
-    if (status.operationMode === 'heat') {
-      return this.platform.Characteristic.TargetHeatingCoolingState.HEAT;
-    } else if (status.operationMode === 'cool') {
-      return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
-    } else if (this.isAutoMode(status.operationMode)) {
-      return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
-    } else if (status.operationMode === 'dry' || status.operationMode === 'vent') {
-      // Dry and fan-only have no HomeKit Thermostat state and are driven by their
-      // dedicated Dry/Fan switches. Report COOL (a running, non-OFF state) rather
-      // than OFF so a scene/automation that sets the Thermostat to Off registers a
-      // real COOL→OFF transition and actually turns the unit off. If we reported OFF
-      // here (as before), iOS would suppress the redundant Off write, the setter
-      // would never fire, and the still-ON Dry/Fan switch would keep the unit
-      // running. mapToCurrentHeatingCoolingState reports COOL too, so the tile shows
-      // the unit as running. COOL fits dry naturally — its setpoint lives in spCool.
-      return this.platform.Characteristic.TargetHeatingCoolingState.COOL;
-    }
-    return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
+  /**
+   * The requested mode. TargetHeaterCoolerState has only AUTO/HEAT/COOL: no OFF
+   * (that's `Active`) and nothing for dry or fan-only, which report COOL (dry's
+   * setpoint lives in spCool). While the unit is off it shows the mode power-on
+   * will restore, not a guess.
+   */
+  private mapToTargetHeaterCoolerState(status: DeviceStatus | null): number {
+    const off = !status || status.power === 0 || status.operationMode === 'off';
+    return this.modeToTargetState(off ? this.lastActiveMode() : status!.operationMode);
   }
 
-  private getTargetTempFromStatus(status: DeviceStatus): number {
-    // Return the appropriate setpoint based on current mode
-    if (status.operationMode === 'heat' && status.spHeat !== undefined && status.spHeat !== null) {
-      return status.spHeat;
-    } else if (status.operationMode === 'cool' && status.spCool !== undefined && status.spCool !== null) {
-      return status.spCool;
-    } else if (this.isAutoMode(status.operationMode) && status.spAuto !== null && status.spAuto !== undefined) {
-      return status.spAuto;
-    } else if (
-      status.operationMode === 'dry' &&
-      this.dryUsesSetpoint() &&
-      status.spCool !== undefined &&
-      status.spCool !== null
-    ) {
-      // Dry holds its setpoint in spCool, not spHeat (Kumo v3, verified live).
-      return status.spCool;
+  private modeToTargetState(mode: string): number {
+    const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    if (this.isAutoMode(mode)) {
+      return T.AUTO;
     }
-    // Default to heat setpoint if available, otherwise return a default value
-    if (status.spHeat !== undefined && status.spHeat !== null) {
-      return status.spHeat;
+    if (mode === 'heat') {
+      return T.HEAT;
     }
-    // Final fallback
-    return 20;
+    return T.COOL; // cool, dry, vent
+  }
+
+  /** Push Active and both heater-cooler states from the cached status. */
+  private refreshClimateCharacteristics(): void {
+    if (!this.currentStatus) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    this.service.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
+    this.service.updateCharacteristic(
+      C.CurrentHeaterCoolerState, this.mapToCurrentHeaterCoolerState(this.currentStatus));
+    this.service.updateCharacteristic(
+      C.TargetHeaterCoolerState, this.mapToTargetHeaterCoolerState(this.currentStatus));
+  }
+
+  /** Push both setpoints (thresholds) from a status, skipping missing values. */
+  private refreshThresholds(status: DeviceStatus): void {
+    const C = this.platform.Characteristic;
+    const heat = this.validSetpoint(status.spHeat);
+    const cool = this.validSetpoint(status.spCool);
+    if (heat !== undefined) {
+      this.service.updateCharacteristic(C.HeatingThresholdTemperature, heat);
+    }
+    if (cool !== undefined) {
+      this.service.updateCharacteristic(C.CoolingThresholdTemperature, cool);
+    }
+  }
+
+  private validSetpoint(v: number | null | undefined): number | undefined {
+    return typeof v === 'number' && !isNaN(v) ? v : undefined;
+  }
+
+  /** Collapse a reported mode (autoHeat/autoCool) to one the API accepts; null if not an active mode. */
+  private normalizeSendMode(mode: string | undefined | null): ActiveMode | null {
+    if (!mode) {
+      return null;
+    }
+    if (this.isAutoMode(mode)) {
+      return 'auto';
+    }
+    if (mode === 'heat' || mode === 'cool' || mode === 'dry' || mode === 'vent') {
+      return mode;
+    }
+    return null;
+  }
+
+  /**
+   * Remember the mode power-on should restore. HomeKit sends Active=1 with no mode
+   * of its own, and an off unit reports mode 'off'; the fork this code came from
+   * fell back to AUTO there, so every unit turned on in AUTO. Kept in accessory
+   * context, which Homebridge persists, so it survives a restart while the unit is off.
+   */
+  private rememberActiveMode(status: DeviceStatus): void {
+    if (status.power !== 1) {
+      return;
+    }
+    const mode = this.normalizeSendMode(status.operationMode);
+    if (mode && this.accessory.context) {
+      this.accessory.context.lastActiveMode = mode;
+    }
+  }
+
+  /** Seed the remembered mode from the cloud's own memory, only if we have none. */
+  private seedActiveMode(previousOperationMode: string | undefined | null): void {
+    if (!this.accessory.context || this.accessory.context.lastActiveMode) {
+      return;
+    }
+    const mode = this.normalizeSendMode(previousOperationMode);
+    if (mode) {
+      this.accessory.context.lastActiveMode = mode;
+    }
+  }
+
+  private lastActiveMode(): ActiveMode {
+    return this.normalizeSendMode(this.accessory.context?.lastActiveMode) ?? this.defaultOnMode();
+  }
+
+  /** Power-on mode with nothing remembered: AUTO where it exists, else COOL. */
+  private defaultOnMode(): 'cool' | 'auto' {
+    return this.deviceProfile && !this.deviceProfile.hasModeHeat ? 'cool' : 'auto';
   }
 
   private isAutoMode(operationMode: string): boolean {
@@ -1229,94 +1355,178 @@ export class KumoThermostatAccessory {
     );
   }
 
-  async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
-    this.assertReachable();
-    // Never block on API calls - return cached state or default immediately
-    // Updates will come from streaming/polling and update the characteristic
-    if (!this.currentStatus) {
-      this.platform.log.debug('No status available yet for getCurrentHeatingCoolingState, returning OFF');
-      return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
-    }
-
-    const state = this.mapToCurrentHeatingCoolingState(this.currentStatus);
-    this.platform.log.debug('Get CurrentHeatingCoolingState:', state);
-    return state;
+  /**
+   * True only while a HomeKit "off" is in flight, i.e. inside the scene burst.
+   * Distinct from shouldSuppressSetpoint(), which is also true for a unit that has
+   * simply been off a while: picking a mode on an off unit is how a user turns it
+   * on, and must keep working.
+   */
+  private offInFlight(): boolean {
+    return Date.now() - this.offRequestedAt < this.OFF_SUPPRESS_WINDOW_MS;
   }
 
-  async getTargetHeatingCoolingState(): Promise<CharacteristicValue> {
-    this.assertReachable();
-    // Never block on API calls - return cached state or default immediately
-    if (!this.currentStatus) {
-      this.platform.log.debug('No status available yet for getTargetHeatingCoolingState, returning OFF');
-      return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
-    }
+  // ---- HeaterCooler: power and mode ---------------------------------------
 
-    const state = this.mapToTargetHeatingCoolingState(this.currentStatus);
-    this.platform.log.debug('Get TargetHeatingCoolingState:', state);
-    return state;
+  async getActive(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    if (!this.currentStatus) {
+      return this.platform.Characteristic.Active.INACTIVE;
+    }
+    return this.mapToActive(this.currentStatus);
   }
 
-  async setTargetHeatingCoolingState(value: CharacteristicValue) {
+  async setActive(value: CharacteristicValue): Promise<void> {
     this.assertReachable();
-    this.platform.log.debug('Set TargetHeatingCoolingState:', value);
+    const on = value === this.platform.Characteristic.Active.ACTIVE;
+    this.platform.log.info(`[ACTIVE] ${this.accessory.displayName}: HomeKit sent ${on ? 'ON' : 'OFF'}`);
+    if (!on) {
+      // Synchronously, before anything awaits: a setpoint write dispatched in the
+      // same scene burst must see the off (see offRequestedAt).
+      this.noteModeIntent('off');
+    }
+    return this.queuePowerMode({ active: on });
+  }
 
-    let operationMode: 'off' | 'heat' | 'cool' | 'auto';
-    let modeName: string;
+  async getCurrentHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    if (!this.currentStatus) {
+      return this.platform.Characteristic.CurrentHeaterCoolerState.INACTIVE;
+    }
+    return this.mapToCurrentHeaterCoolerState(this.currentStatus);
+  }
 
+  async getTargetHeaterCoolerState(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.mapToTargetHeaterCoolerState(this.currentStatus);
+  }
+
+  async setTargetHeaterCoolerState(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    let mode: 'heat' | 'cool' | 'auto';
     switch (value) {
-      case this.platform.Characteristic.TargetHeatingCoolingState.OFF:
-        operationMode = 'off';
-        modeName = 'OFF';
-        break;
-      case this.platform.Characteristic.TargetHeatingCoolingState.HEAT:
-        operationMode = 'heat';
-        modeName = 'HEAT';
-        break;
-      case this.platform.Characteristic.TargetHeatingCoolingState.COOL:
-        operationMode = 'cool';
-        modeName = 'COOL';
-        break;
-      case this.platform.Characteristic.TargetHeatingCoolingState.AUTO:
-        operationMode = 'auto';
-        modeName = 'AUTO';
-        break;
+      case T.HEAT: mode = 'heat'; break;
+      case T.COOL: mode = 'cool'; break;
+      case T.AUTO: mode = 'auto'; break;
       default:
-        this.platform.log.error('Unknown target heating cooling state:', value);
+        this.platform.log.error('Unknown target heater-cooler state:', value);
         return;
     }
+    this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${mode.toUpperCase()}`);
+    return this.queuePowerMode({ mode });
+  }
 
-    this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${modeName} mode`);
+  /**
+   * Collect power and mode writes from one HomeKit request into one command.
+   * hap-nodejs dispatches every handler in a write request concurrently, so they
+   * all land here before the zero-delay timer fires. Every caller in the burst
+   * gets the same promise, resolved once the command has been sent.
+   */
+  private queuePowerMode(patch: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' }): Promise<void> {
+    this.pendingPowerMode = { ...(this.pendingPowerMode ?? {}), ...patch };
+    if (!this.powerModeFlush) {
+      this.powerModeFlush = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          const intent = this.pendingPowerMode ?? {};
+          this.pendingPowerMode = null;
+          this.powerModeFlush = null;
+          this.flushPowerMode(intent)
+            .catch((err) => this.platform.log.error(`${this.accessory.displayName}: power/mode error:`, err))
+            .then(resolve, resolve);
+        }, 0);
+      });
+    }
+    return this.powerModeFlush;
+  }
 
-    // Synchronously (before the await) note the off/active intent so a setpoint
-    // write dispatched later in the same scene burst is suppressed rather than
-    // reviving the unit. See offRequestedAt.
-    this.noteModeIntent(operationMode);
-
-    const success = await this.sendDeviceCommand({ operationMode }, 'homekit:mode');
-
-    if (success) {
-      this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: Command accepted by API`);
-
-      // Optimistic update - immediately update local state
-      if (this.currentStatus) {
-        this.currentStatus.operationMode = operationMode;
-        this.currentStatus.power = operationMode === 'off' ? 0 : 1;
+  /**
+   * Resolve one burst of power/mode intent into a single command:
+   *  - Active=0 wins: off, whatever mode came with it (an "AC off" scene re-sends
+   *    its captured mode alongside the off).
+   *  - Active=1 with a mode: on in that mode. Without one: the last active mode.
+   *  - A mode alone: on in that mode, unless it trails an off in the same scene
+   *    burst, which would revive the unit the off just stopped.
+   * Turning on also carries any setpoint written while off in this same burst, so
+   * "on, cool, 72" lands as one command at 72 instead of at the old setpoint.
+   */
+  private async flushPowerMode(intent: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' }): Promise<void> {
+    const name = this.accessory.displayName;
+    let operationMode: 'off' | ActiveMode;
+    if (intent.active === false) {
+      operationMode = 'off';
+    } else if (intent.active === true) {
+      operationMode = intent.mode ?? this.lastActiveMode();
+    } else if (intent.mode) {
+      if (this.offInFlight()) {
+        this.platform.log.debug(`[MODE CHANGE] ${name}: an off is in flight — not sending ${intent.mode}`);
+        setTimeout(() => this.refreshClimateCharacteristics(), 100);
+        return;
       }
-
-      // Picking any thermostat mode leaves fan-only and dry inactive
-      if (this.fanOnlyService) {
-        this.fanOnlyService.updateCharacteristic(this.platform.Characteristic.On, false);
-      }
-      if (this.dryService) {
-        this.dryService.updateCharacteristic(this.platform.Characteristic.On, false);
-      }
-
-      // Mirror a HomeKit-driven mode change to any followers immediately.
-      this.notifyStatusListeners();
-
-      // Note: Platform will update on next poll cycle (no per-device polling timer)
+      operationMode = intent.mode;
     } else {
-      this.platform.log.error(`[MODE CHANGE] ${this.accessory.displayName}: Failed to set mode to ${modeName}`);
+      return;
+    }
+
+    // An active mode clears any pending off window (the off itself was noted
+    // synchronously in setActive).
+    if (operationMode !== 'off') {
+      this.noteModeIntent(operationMode);
+    }
+
+    const commands: Commands = { operationMode };
+    const wasOff = !this.currentStatus || this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off';
+    if (operationMode !== 'off' && wasOff) {
+      this.attachSameBurstSetpoints(commands, operationMode);
+    }
+    this.setpointsCachedWhileOff.clear();
+
+    const origin: CommandOrigin = intent.active !== undefined ? 'homekit:active' : 'homekit:mode';
+    const label = origin === 'homekit:active' ? 'ACTIVE' : 'MODE CHANGE';
+    const success = await this.sendDeviceCommand(commands, origin);
+    if (!success) {
+      this.platform.log.error(`[${label}] ${name}: failed to set ${operationMode}`);
+      setTimeout(() => this.refreshClimateCharacteristics(), 100);
+      return;
+    }
+
+    if (this.currentStatus) {
+      this.currentStatus.operationMode = operationMode;
+      this.currentStatus.power = operationMode === 'off' ? 0 : 1;
+      if (commands.spHeat !== undefined) {
+        this.currentStatus.spHeat = commands.spHeat;
+      }
+      if (commands.spCool !== undefined) {
+        this.currentStatus.spCool = commands.spCool;
+      }
+      this.rememberActiveMode(this.currentStatus);
+      this.refreshClimateCharacteristics();
+      this.refreshThresholds(this.currentStatus);
+    }
+    // Heat/cool/auto/off leave the Dry and Fan switches off; a power-on that
+    // restored dry or fan-only turns its switch on.
+    this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, this.isFanOnlyActive(this.currentStatus));
+    this.dryService?.updateCharacteristic(this.platform.Characteristic.On, this.isDryActive(this.currentStatus));
+    this.notifyStatusListeners();
+  }
+
+  /** Add setpoints written while the unit was off, if they arrived in this burst. */
+  private attachSameBurstSetpoints(commands: Commands, mode: ActiveMode): void {
+    const now = Date.now();
+    const fresh = (field: SetpointField): number | undefined => {
+      const cached = this.setpointsCachedWhileOff.get(field);
+      return cached && now - cached.at <= this.SAME_BURST_MS ? cached.value : undefined;
+    };
+    if (mode === 'heat' || mode === 'auto') {
+      const v = fresh('spHeat');
+      if (v !== undefined) {
+        commands.spHeat = v;
+      }
+    }
+    if (mode === 'cool' || mode === 'auto' || (mode === 'dry' && this.dryUsesSetpoint())) {
+      const v = fresh('spCool');
+      if (v !== undefined) {
+        commands.spCool = v;
+      }
     }
   }
 
@@ -1341,139 +1551,10 @@ export class KumoThermostatAccessory {
     return temp;
   }
 
-  async getTargetTemperature(): Promise<CharacteristicValue> {
-    this.assertReachable();
-    // Never block on API calls - return cached or default value immediately
-    if (!this.currentStatus) {
-      this.platform.log.debug('No status available yet for getTargetTemperature, returning default');
-      return 20; // Default fallback temperature
-    }
-
-    const temp = this.getTargetTempFromStatus(this.currentStatus);
-    if (temp === undefined || temp === null || isNaN(temp)) {
-      // Only warn if we've received valid updates before (not during initial state)
-      if (this.hasReceivedValidUpdate) {
-        this.platform.log.warn(`Invalid target temperature value for ${this.accessory.displayName}:`, temp);
-      }
-      return 20; // Default fallback temperature
-    }
-
-    this.platform.log.debug(`HomeKit get target temp for ${this.accessory.displayName}: ${temp}°C`);
-    return temp;
-  }
-
-  async setTargetTemperature(value: CharacteristicValue) {
-    this.assertReachable();
-    const temp = value as number;
-
-    // Convert to Fahrenheit for logging
-    const tempF = (temp * 9/5) + 32;
-    this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: HomeKit sent ${temp.toFixed(3)}°C (${tempF.toFixed(1)}°F)`);
-
-    if (!this.currentStatus) {
-      this.platform.log.error('Cannot set temperature - no current status');
-      return;
-    }
-
-    // HomeKit can push a target temperature even while the unit is off — its
-    // Thermostat service has no off-aware setpoint, and automations/scenes that
-    // capture a thermostat's full state re-send the last setpoint alongside
-    // `off`. The Kumo v3 API rejects a bare setpoint on a powered-off unit
-    // (`modeRequiredWhenDeviceOff`, HTTP 400), so don't send a doomed command:
-    // the unit is off, there's nothing to set. Cache the value and echo it back
-    // to HomeKit so the slider holds; the setpoint is sent when the unit is
-    // turned on (the mode handlers carry it).
-    if (this.shouldSuppressSetpoint()) {
-      this.platform.log.debug(
-        `[TEMP CHANGE] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending (avoids a doomed 400 and a setpoint that would revive the unit)`,
-      );
-      this.currentStatus.spHeat = temp;
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetTemperature,
-        temp,
-      );
-      return;
-    }
-
-    // Set the appropriate setpoint based on current mode
-    const commands: { spHeat?: number; spCool?: number } = {};
-
-    if (this.currentStatus.operationMode === 'heat') {
-      commands.spHeat = temp;
-    } else if (this.currentStatus.operationMode === 'cool') {
-      commands.spCool = temp;
-    } else if (this.isAutoMode(this.currentStatus.operationMode)) {
-      // For auto mode, set both setpoints
-      commands.spHeat = temp;
-      commands.spCool = temp;
-    } else if (this.currentStatus.operationMode === 'dry' && this.dryUsesSetpoint()) {
-      // Dry holds its setpoint in spCool, not spHeat (Kumo v3; there is no spDry
-      // field). Verified live: the spCool write is adopted and the unit stays in
-      // dry — sending spCool alone is sufficient, no operationMode needed.
-      commands.spCool = temp;
-    } else {
-      // Fan-only ('vent'), dry-without-setpoint, or any other non-off mode:
-      // no meaningful target. Default to the heat setpoint (unchanged behavior).
-      commands.spHeat = temp;
-    }
-
-    // Hold briefly so an "AC off" dispatched alongside this setpoint wins
-    // regardless of order (see setpointWriteGen).
-    const hold = await this.holdSetpointWrite('target');
-    if (hold === 'superseded') {
-      return;
-    }
-    if (hold === 'suppressed') {
-      this.platform.log.debug(
-        `[TEMP CHANGE] ${this.accessory.displayName}: unit turned off while held — caching ${temp}°C without sending`,
-      );
-      if (this.currentStatus) {
-        if (commands.spHeat !== undefined) {
-          this.currentStatus.spHeat = commands.spHeat;
-        }
-        if (commands.spCool !== undefined) {
-          this.currentStatus.spCool = commands.spCool;
-        }
-      }
-      this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, temp);
-      return;
-    }
-
-    this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Sending to API: ${JSON.stringify(commands)}°C`);
-
-    const success = await this.sendDeviceCommand(commands, 'homekit:temp');
-
-    if (success) {
-      this.platform.log.info(`[TEMP CHANGE] ${this.accessory.displayName}: Command accepted by API`);
-
-      // Optimistic update - immediately update local state
-      if (this.currentStatus) {
-        if (commands.spHeat !== undefined) {
-          this.currentStatus.spHeat = commands.spHeat;
-        }
-        if (commands.spCool !== undefined) {
-          this.currentStatus.spCool = commands.spCool;
-        }
-      }
-
-      // Immediately notify HomeKit of the new value
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetTemperature,
-        temp,
-      );
-
-      // Mirror a HomeKit-driven setpoint change to any followers immediately.
-      this.notifyStatusListeners();
-
-      // Note: Platform will update on next poll cycle (no per-device polling timer)
-    } else {
-      this.platform.log.error(`Failed to set target temperature for ${this.accessory.displayName}: ${JSON.stringify(commands)}`);
-    }
-  }
-
-  // ---- AUTO-mode dual setpoints -------------------------------------------
-  // In AUTO the Home app shows a range; the heating handle reads/writes spHeat
-  // and the cooling handle reads/writes spCool (these units have no spAuto).
+  // ---- Setpoints -----------------------------------------------------------
+  // The two thresholds are the setpoint controls in every mode: the heating
+  // threshold (spHeat) in HEAT, the cooling threshold (spCool) in COOL and in dry,
+  // and both as a range in AUTO (these units have no spAuto).
 
   async getHeatingThresholdTemperature(): Promise<CharacteristicValue> {
     this.assertReachable();
@@ -1498,27 +1579,43 @@ export class KumoThermostatAccessory {
 
   async setHeatingThresholdTemperature(value: CharacteristicValue) {
     this.assertReachable();
-    await this.setThresholdTemperature('spHeat', value as number);
+    await this.setThresholdTemperature('spHeat', this.quantize('spHeat', value as number));
   }
 
   async setCoolingThresholdTemperature(value: CharacteristicValue) {
     this.assertReachable();
-    await this.setThresholdTemperature('spCool', value as number);
+    await this.setThresholdTemperature('spCool', this.quantize('spCool', value as number));
   }
 
   /**
-   * Write one edge of the AUTO setpoint band. HomeKit pushes these when the user
-   * drags the range handles in AUTO: spHeat is the low/heat bound, spCool the
-   * high/cool bound. Mirrors setTargetTemperature — same powered-off guard (the
-   * v3 API 400s a bare setpoint on an off unit, see 1.5.2), optimistic echo, and
-   * revert-on-failure. spHeat/spCool are always the per-mode setpoints, so this
-   * is safe even on the rare out-of-AUTO write.
+   * Snap an inbound setpoint to the whole-°F grid, inside this unit's range, so
+   * "72°F" is stored as 22.3°C and both the Home app and the Comfort app show 72.
+   * It has to happen here: HAP applies minStep only outbound and hands a
+   * controller's write through verbatim, and 1.x rounded on the LAN path only, so
+   * the same tap stored a different value depending on which transport carried it.
    */
-  private async setThresholdTemperature(field: 'spHeat' | 'spCool', temp: number): Promise<void> {
+  private quantize(field: SetpointField, temp: number): number {
+    const r = this.setpointRanges(this.deviceProfile);
+    const [min, max] = field === 'spHeat' ? [r.heatMin, r.heatMax] : [r.coolMin, r.coolMax];
+    const q = quantizeSetpointInRange(temp, min, max);
+    if (q !== temp) {
+      this.platform.log.debug(
+        `[SETPOINT] ${this.accessory.displayName}: ${temp}°C -> ${q}°C (${cToF(q).toFixed(0)}°F on the whole-°F grid)`,
+      );
+    }
+    return q;
+  }
+
+  /**
+   * Write one setpoint. Powered-off guard (the v3 API 400s a bare setpoint on an
+   * off unit, see 1.5.2), a brief hold so a concurrent "AC off" wins (1.8.2),
+   * optimistic echo, and revert on failure.
+   */
+  private async setThresholdTemperature(field: SetpointField, temp: number): Promise<void> {
     const characteristic = field === 'spHeat'
       ? this.platform.Characteristic.HeatingThresholdTemperature
       : this.platform.Characteristic.CoolingThresholdTemperature;
-    const label = field === 'spHeat' ? 'AUTO HEAT SP' : 'AUTO COOL SP';
+    const label = field === 'spHeat' ? 'HEAT SP' : 'COOL SP';
     const fallback = field === 'spHeat' ? 20 : 24;
 
     const tempF = (temp * 9 / 5) + 32;
@@ -1541,6 +1638,11 @@ export class KumoThermostatAccessory {
       );
       this.currentStatus[field] = temp;
       this.service.updateCharacteristic(characteristic, temp);
+      // Off but not being turned off: a power-on in this same burst carries it
+      // (see attachSameBurstSetpoints). Setpoints trailing an off are never kept.
+      if (!this.offInFlight()) {
+        this.setpointsCachedWhileOff.set(field, { value: temp, at: Date.now() });
+      }
       return;
     }
 
@@ -1708,18 +1810,9 @@ export class KumoThermostatAccessory {
         this.currentStatus.fanSpeed = fan;
       }
 
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.CurrentHeatingCoolingState,
-        this.mapToCurrentHeatingCoolingState(this.currentStatus),
-      );
-      this.service.updateCharacteristic(
-        this.platform.Characteristic.TargetHeatingCoolingState,
-        this.mapToTargetHeatingCoolingState(this.currentStatus),
-      );
-      const targetTemp = this.getTargetTempFromStatus(this.currentStatus);
-      if (!isNaN(targetTemp)) {
-        this.service.updateCharacteristic(this.platform.Characteristic.TargetTemperature, targetTemp);
-      }
+      this.rememberActiveMode(this.currentStatus);
+      this.refreshClimateCharacteristics();
+      this.refreshThresholds(this.currentStatus);
       if (this.dryService) {
         this.dryService.updateCharacteristic(
           this.platform.Characteristic.On,

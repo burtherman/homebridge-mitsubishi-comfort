@@ -66,7 +66,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // Definitely assigned unless the config is invalid, in which case the constructor
   // returns early and no code path that uses it is ever registered.
   private readonly kumoAPI!: KumoAPI;
-  private readonly kumoConfig: KumoConfig;
+  public readonly kumoConfig: KumoConfig;
   private readonly sitePollers: Map<string, NodeJS.Timeout> = new Map();
   private readonly siteAccessories: Map<string, KumoThermostatAccessory[]> = new Map();
   private readonly degradedPollInterval: number;

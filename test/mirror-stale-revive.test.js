@@ -28,7 +28,7 @@ function makeLog() { const noop = () => {}; return { info: noop, warn: noop, err
 // Real hap-nodejs enum values (see test/helpers.js). The old per-file fake gave
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
-const Service = { AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat', Switch: 'Switch', FilterMaintenance: 'FilterMaintenance' };
+const { Service } = require('./helpers');
 
 function makeCharacteristic() { const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } }; return ch; }
 function makeService(type, name, subtype) {
@@ -99,7 +99,7 @@ test('a stale cloud "cool" after a local OFF does not re-fire the mirror hook', 
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
   // Skylight scene turns the source OFF over the LAN.
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  await handler.setActive(Characteristic.Active.INACTIVE);
 
   // The Kumo cloud lags and replays the pre-off "cool" state.
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1, spCool: 24 }));
@@ -120,7 +120,7 @@ test('a REAL local change after an OFF still fires the mirror hook (following pr
   const seen = [];
   handler.onStatusUpdate((s) => seen.push({ operationMode: s.operationMode, power: s.power }));
 
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  await handler.setActive(Characteristic.Active.INACTIVE);
 
   // A genuine local poll (e.g. someone used the wall thermostat) reads cool — the
   // mirror MUST still follow this (the fix only blocks stale *cloud* data, never

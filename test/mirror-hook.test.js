@@ -16,7 +16,7 @@ function makeLog() { const noop = () => {}; return { info: noop, warn: noop, err
 // Real hap-nodejs enum values (see test/helpers.js). The old per-file fake gave
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
-const Service = { AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat', Switch: 'Switch', FilterMaintenance: 'FilterMaintenance' };
+const { Service } = require('./helpers');
 
 function makeCharacteristic() { const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } }; return ch; }
 function makeService(type, name, subtype) {
@@ -72,8 +72,8 @@ test('onStatusUpdate fires after a HomeKit setpoint change (setter hook)', async
   handler.updateFromZone(zone({ operationMode: 'heat', spHeat: 20 })); // seed status
   const seen = [];
   handler.onStatusUpdate((s) => seen.push(s.spHeat));
-  await handler.setTargetTemperature(23);
-  assert.ok(seen.includes(23), `expected a listener fire with spHeat 23, got ${JSON.stringify(seen)}`);
+  await handler.setHeatingThresholdTemperature(22.3);
+  assert.ok(seen.includes(22.3), `expected a listener fire with spHeat 22.3, got ${JSON.stringify(seen)}`);
 });
 
 test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () => {
@@ -81,7 +81,7 @@ test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () 
   handler.updateFromZone(zone({ operationMode: 'heat' })); // seed status
   const seen = [];
   handler.onStatusUpdate((s) => seen.push(s.operationMode));
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.COOL);
+  await handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.COOL);
   assert.ok(seen.includes('cool'), `expected a listener fire with mode cool, got ${JSON.stringify(seen)}`);
 });
 

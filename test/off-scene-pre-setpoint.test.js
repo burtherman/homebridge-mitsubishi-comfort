@@ -32,12 +32,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } };
@@ -111,7 +106,7 @@ test('a scene setpoint dispatched just BEFORE the off never reaches the device',
   // The 19:26:56 dispatch order: the scene's stale captured setpoint first,
   // then the off. Fired concurrently, as HomeKit does.
   const pSp = handler.setCoolingThresholdTemperature(25);
-  const pOff = handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  const pOff = handler.setActive(Characteristic.Active.INACTIVE);
   await Promise.all([pSp, pOff]);
 
   const setpoints = sendCommandCalls.filter(isSetpoint);
@@ -126,25 +121,26 @@ test('a scene setpoint dispatched just BEFORE the off never reaches the device',
   );
 });
 
-test('the same holds for the plain TargetTemperature setpoint', async () => {
+test('the same holds for the heating threshold and the captured mode', async () => {
   const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone({ power: 1, operationMode: 'cool', spCool: 22.5 }));
+  handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 21.2 }));
 
-  const pSp = handler.setTargetTemperature(25);
-  const pOff = handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
-  await Promise.all([pSp, pOff]);
+  const pSp = handler.setHeatingThresholdTemperature(25);
+  const pMode = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
+  const pOff = handler.setActive(Characteristic.Active.INACTIVE);
+  await Promise.all([pSp, pMode, pOff]);
 
-  assert.strictEqual(sendCommandCalls.filter(isSetpoint).length, 0);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }]);
 });
 
 test('control: a setpoint with no off in the burst still sends', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'cool', spCool: 22.5 }));
 
-  await handler.setTargetTemperature(23.5);
+  await handler.setCoolingThresholdTemperature(23.9);
 
   assert.strictEqual(sendCommandCalls.length, 1);
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.5 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 });
 });
 
 test('a drag sends only its final value', async () => {
@@ -152,13 +148,13 @@ test('a drag sends only its final value', async () => {
   handler.updateFromZone(zone({ power: 1, operationMode: 'cool', spCool: 22.5 }));
 
   await Promise.all([
-    handler.setTargetTemperature(23),
-    handler.setTargetTemperature(23.5),
-    handler.setTargetTemperature(24),
+    handler.setCoolingThresholdTemperature(23.4), // 74°F
+    handler.setCoolingThresholdTemperature(23.9), // 75°F
+    handler.setCoolingThresholdTemperature(24.5), // 76°F
   ]);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'intermediate drag values are superseded');
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24.5 });
 });
 
 test('the two AUTO handles do not supersede each other', async () => {

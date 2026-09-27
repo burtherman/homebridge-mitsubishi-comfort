@@ -37,6 +37,16 @@ export interface KumoConfig {
   // Kumo app, or HomeKit), the source's full state is pushed to the target. One-way;
   // a manual change to the target persists until the next source change re-syncs it.
   mirror?: MirrorPair[];
+  // ---- HomeKit display options (2.0) ----
+  // Dry and fan-only have no HeaterCooler mode, so each is a separate Switch on units
+  // whose profile supports it. ON by default: they're the only controls whose
+  // automations survive the 2.0 move from Thermostat to HeaterCooler. Set false to hide.
+  showDrySwitch?: boolean;
+  showFanOnlySwitch?: boolean;
+  // Indoor humidity as a HumiditySensor service (HeaterCooler has no humidity
+  // characteristic). Default true. The Home app can favor a sensor reading on a
+  // combined tile; set false to drop it, or use Home's "Show as Separate Tiles".
+  showHumiditySensor?: boolean;
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */

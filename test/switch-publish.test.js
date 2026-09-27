@@ -31,12 +31,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = {
@@ -149,12 +144,12 @@ test('re-applying the same profile does not re-publish (guarded on real change)'
 
 test('the temperature-range line is logged once, not on every profile heartbeat', () => {
   // profile_update is a ~15-min heartbeat carrying identical setpoint limits.
-  // Logging "Set temperature range" each tick fills the log; it must only fire
+  // Logging the setpoint range each tick fills the log; it must only fire
   // when the range actually changes.
   const infos = [];
   const log = { info: (m) => infos.push(String(m)), warn() {}, error() {}, debug() {} };
   const { applyProfile } = makeHarness(log);
-  const rangeLines = () => infos.filter((m) => /Set temperature range/.test(m)).length;
+  const rangeLines = () => infos.filter((m) => /setpoint range/.test(m)).length;
 
   applyProfile(profile());
   assert.strictEqual(rangeLines(), 1, 'logged once on the first profile');
@@ -176,9 +171,9 @@ test('dropping dry support removes the switch and publishes the removal', () => 
   assert.ok(updates.length > before, 'removal re-published to HomeKit');
 });
 
-// Same bug class as the switches: the humidity characteristic is added to the
-// thermostat service the first time a humidity reading arrives — long after the
-// accessory was published — so it must re-publish too.
+// Same bug class as the switches: the humidity sensor service is added the first
+// time a humidity reading arrives — long after the accessory was published — so it
+// must re-publish too.
 test('first humidity reading publishes the humidity characteristic', () => {
   const { handler, updates } = makeHarness();
   const before = updates.length;

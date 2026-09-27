@@ -18,12 +18,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } };

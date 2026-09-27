@@ -1,115 +1,51 @@
 'use strict';
 
-// Regression test for the dry-mode setpoint field bug.
+// Dry mode's setpoint lives in spCool.
 //
-// On the Kumo v3 cloud, Dry mode holds its temperature setpoint in `spCool`
-// (there is no spDry field). The old code routed dry through the catch-all
-// `else` branch that writes/reads `spHeat`, so dry-mode temperature changes
-// silently did nothing — the cloud accepted the spHeat write but the unit
-// ignored it (and some writes 400'd with `invalidSpHeatRange`). Live-confirmed
-// against the real account: a unit in dry reports e.g. spCool=25, spHeat=23, and
-// the plugin surfaced 23 (the wrong field). Writing spCool while in dry is
-// adopted and the unit stays in dry.
+// On the Kumo v3 cloud, dry holds its temperature setpoint in `spCool` (there is no
+// spDry). 1.5.3 fixed a bug where dry routed through a catch-all that wrote spHeat,
+// which the unit ignored. Live-confirmed: a unit in dry reported spCool=25, spHeat=23,
+// and writing spCool while in dry is adopted with the unit staying in dry.
 //
-// The fix routes dry to spCool in both setTargetTemperature (write) and
-// getTargetTempFromStatus (read), gated on the device profile's
-// `usesSetPointInDryMode` flag — but defaulting to "has a setpoint" until the
-// async profile arrives, so the common case works immediately.
+// On the HeaterCooler (2.0) that routing is structural: dry reports target COOL, so
+// the Home app shows the cooling threshold, which reads and writes spCool. The
+// profile's `usesSetPointInDryMode` still gates the one place the plugin adds a dry
+// setpoint on its own: a power-on that restores dry.
+//
+// Values are on the whole-°F grid: 23.9 = 75°F, 26.7 = 80°F.
 
 const test = require('node:test');
 const assert = require('node:assert');
 const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers');
 
 const SERIAL = 'TESTSERIAL001';
 
-function makeLog() {
-  const noop = () => {};
-  return { info: noop, warn: noop, error: noop, debug: noop };
-}
-
-// Real hap-nodejs enum values (see test/helpers.js). The old per-file fake gave
-// every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
-const { Characteristic } = require('./helpers');
-
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
-
-function makeCharacteristic() {
-  const ch = {
-    value: undefined,
-    onGet() { return ch; },
-    onSet() { return ch; },
-    setProps() { return ch; },
-  };
-  return ch;
-}
-
-function makeService(type, name, subtype) {
-  const chars = new Map();
-  const svc = {
-    type, name, subtype,
-    getCharacteristic(id) {
-      if (!chars.has(id)) chars.set(id, makeCharacteristic());
-      return chars.get(id);
-    },
-    setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-    updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
-  };
-  return svc;
-}
-
-function makeAccessory() {
-  const entries = [
-    { type: Service.AccessoryInformation, subtype: undefined, svc: makeService(Service.AccessoryInformation) },
-  ];
-  return {
-    displayName: 'Kitchen',
-    context: { device: { deviceSerial: SERIAL, siteId: 'site-1', displayName: 'Kitchen' } },
-    getService(type) {
-      const e = entries.find((x) => x.type === type && x.subtype === undefined);
-      return e ? e.svc : null;
-    },
-    getServiceById(type, subtype) {
-      const e = entries.find((x) => x.type === type && x.subtype === subtype);
-      return e ? e.svc : null;
-    },
-    addService(type, name, subtype) {
-      const svc = makeService(type, name, subtype);
-      entries.push({ type, subtype, svc });
-      return svc;
-    },
-    removeService(svc) {
-      const i = entries.findIndex((x) => x.svc === svc);
-      if (i >= 0) entries.splice(i, 1);
-    },
-  };
-}
-
 function makeHarness() {
-  const sendCommandCalls = [];
+  const sent = [];
   let profileCb = null;
-  const platform = {
-    Service,
-    Characteristic,
-    log: makeLog(),
-    api: { updatePlatformAccessories() {} },
-  };
+  const platform = { Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} } };
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate(cb) { profileCb = cb; },
     sendCommand(serial, commands) {
-      sendCommandCalls.push({ serial, commands });
+      sent.push(commands);
       return Promise.resolve(true);
     },
   };
-  const accessory = makeAccessory();
+  const accessory = makeAccessory('Kitchen', SERIAL);
   const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
-  return { handler, accessory, sendCommandCalls, applyProfile: (p) => profileCb(SERIAL, p) };
+  return { handler, accessory, sent, applyProfile: (p) => profileCb(SERIAL, p) };
 }
+
+const profile = (over = {}) => ({
+  numberOfFanSpeeds: 3, hasFanSpeedAuto: true, hasVaneDir: false, hasVaneSwing: false,
+  hasModeDry: true, hasModeHeat: true, hasModeVent: true, hasDefrost: true, hasStandby: true,
+  usesSetPointInDryMode: true,
+  minimumSetPoints: { heat: 16, cool: 19, auto: 17 },
+  maximumSetPoints: { heat: 31, cool: 30, auto: 30 },
+  ...over,
+});
 
 const zone = (over = {}) => ({
   id: 'zone-1',
@@ -121,91 +57,40 @@ const zone = (over = {}) => ({
   },
 });
 
-const profile = (over = {}) => ({
-  minimumSetPoints: { cool: 16, heat: 10, auto: 16 },
-  maximumSetPoints: { cool: 31, heat: 31, auto: 31 },
-  hasModeVent: true,
-  hasModeDry: true,
-  usesSetPointInDryMode: true,
-  ...over,
-});
-
-// ---- Write path ----------------------------------------------------------
-
-test('setting a target temperature in DRY sends spCool, not spHeat', async () => {
-  const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone()); // dry, no profile yet
-
-  await handler.setTargetTemperature(24);
-
-  assert.strictEqual(sendCommandCalls.length, 1, 'a command is sent in dry mode');
-  // Before the fix this was { spHeat: 24 }, which the unit ignored / 400'd.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 },
-    'dry-mode setpoint is written to spCool (no spHeat, no operationMode)');
-});
-
-test('DRY setpoint routes to spCool even before the device profile arrives', async () => {
-  const { handler, sendCommandCalls } = makeHarness();
-  // No applyProfile() call — deviceProfile is null, the common startup window.
-  handler.updateFromZone(zone());
-
-  await handler.setTargetTemperature(26);
-
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 26 },
-    'defaults to a settable dry setpoint until the profile says otherwise');
-});
-
-test('DRY setpoint is suppressed when the profile reports usesSetPointInDryMode=false', async () => {
-  const { handler, sendCommandCalls, applyProfile } = makeHarness();
-  handler.updateFromZone(zone());
-  applyProfile(profile({ usesSetPointInDryMode: false }));
-
-  await handler.setTargetTemperature(24);
-
-  // Such a unit dehumidifies at a fixed setpoint and ignores writes; we fall to
-  // the catch-all (heat) branch rather than writing a spCool it won't honor.
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 24 },
-    'fixed-setpoint dry units do not get a spCool write');
-});
-
-test('COOL mode still sends spCool (control — dry branch did not break it)', async () => {
-  const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone({ operationMode: 'cool' }));
-
-  await handler.setTargetTemperature(24);
-
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 });
-});
-
-test('HEAT mode still sends spHeat (control)', async () => {
-  const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone({ operationMode: 'heat' }));
-
-  await handler.setTargetTemperature(22);
-
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22 });
-});
-
-// ---- Read path -----------------------------------------------------------
-
-test('reading the target temperature in DRY surfaces spCool, not spHeat', async () => {
+test('in DRY the tile shows COOL with the cooling threshold at spCool', async () => {
   const { handler } = makeHarness();
-  // Live capture: Kitchen in dry reported spCool=25, spHeat=23 (stale).
   handler.updateFromZone(zone({ spCool: 25, spHeat: 23 }));
-
-  const target = await handler.getTargetTemperature();
-
-  // Before the fix this fell through to the spHeat fallback and returned 23.
-  assert.strictEqual(target, 25, 'dry surfaces the spCool setpoint');
+  assert.strictEqual(await handler.getTargetHeaterCoolerState(), Characteristic.TargetHeaterCoolerState.COOL);
+  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 25, 'dry surfaces spCool, not the stale spHeat');
 });
 
-test('DRY read falls back to spHeat when the profile says no dry setpoint', async () => {
-  const { handler, applyProfile } = makeHarness();
-  handler.updateFromZone(zone({ spCool: 25, spHeat: 23 }));
+test('in DRY the cooling threshold writes spCool, before the profile arrives too', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone()); // no profile yet: the common startup window
+  await handler.setCoolingThresholdTemperature(23.9);
+  assert.deepStrictEqual(sent, [{ spCool: 23.9 }], 'no spHeat, and no operationMode that would leave dry');
+});
+
+test('power-on restoring DRY carries a same-burst spCool when the unit uses a dry setpoint', async () => {
+  const { handler, sent, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ operationMode: 'dry', power: 1 }));
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await Promise.all([
+    handler.setCoolingThresholdTemperature(26.7),
+    handler.setActive(Characteristic.Active.ACTIVE),
+  ]);
+  assert.deepStrictEqual(sent, [{ operationMode: 'dry', spCool: 26.7 }]);
+});
+
+test('...but not when the profile says dry has a fixed setpoint', async () => {
+  const { handler, sent, applyProfile } = makeHarness();
   applyProfile(profile({ usesSetPointInDryMode: false }));
-
-  const target = await handler.getTargetTemperature();
-
-  assert.strictEqual(target, 23,
-    'a fixed-setpoint dry unit surfaces the existing fallback, not an unrelated spCool');
+  handler.updateFromZone(zone({ operationMode: 'dry', power: 1 }));
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await Promise.all([
+    handler.setCoolingThresholdTemperature(26.7),
+    handler.setActive(Characteristic.Active.ACTIVE),
+  ]);
+  assert.deepStrictEqual(sent, [{ operationMode: 'dry' }], 'a fixed-setpoint dry unit gets no spCool with its power-on');
 });

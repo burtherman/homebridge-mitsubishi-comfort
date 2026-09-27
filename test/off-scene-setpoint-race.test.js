@@ -2,10 +2,12 @@
 
 // Regression test: an "AC off" scene must not leave a unit running.
 //
-// A HomeKit "turn off AC" scene captures each thermostat's full state and, when
-// it fires, re-pushes TargetHeatingCoolingState=OFF *and* the captured setpoints
-// (TargetTemperature, and for an AUTO unit the two threshold handles). HomeKit
-// dispatches these concurrently in an arbitrary order. A setpoint dispatched
+// A HomeKit "turn off AC" scene captures each unit's full state and, when it
+// fires, re-pushes the off *and* the captured mode and setpoints. On the 1.x
+// Thermostat that was TargetHeatingCoolingState=OFF plus TargetTemperature and the
+// two threshold handles; on the 2.0 HeaterCooler it's Active=0 plus
+// TargetHeaterCoolerState and the two thresholds. HomeKit dispatches these
+// concurrently in an arbitrary order. A setpoint dispatched
 // after the off reaches the LAN adapter as a bare, mode-less write (local
 // setpoint commands carry no mode/power — see local-api.ts) and powers the unit
 // back on. Observed live 2026-07-11: the Living room (an AUTO unit) "restarted"
@@ -32,12 +34,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = {
@@ -130,15 +127,15 @@ test('AC-off scene: no setpoint reaches the device after the off (unit stays off
   // Living room was running in dry. Seed that on state the way a poll would.
   handler.updateFromZone(zone({ power: 1, operationMode: 'dry', spCool: 24, spHeat: 20 }));
 
-  // Reproduce the exact scene dispatch order captured in the 06:49:01 log:
-  //   TargetTemperature(21) → OFF → CoolingThreshold(25) → HeatingThreshold(21)
-  // Fired concurrently (not awaited between) to mirror HomeKit's concurrent
-  // dispatch — this is what lets a setpoint's guard check run before the off's
-  // optimistic state update lands.
-  const p1 = handler.setTargetTemperature(21);
-  const p2 = handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
-  const p3 = handler.setCoolingThresholdTemperature(25);
-  const p4 = handler.setHeatingThresholdTemperature(21);
+  // The HeaterCooler form of the dispatch order captured in the 06:49:01 log
+  // (then: TargetTemperature(21) → OFF → CoolingThreshold(25) → HeatingThreshold(21)):
+  // a setpoint, the off, the captured mode, another setpoint. Fired concurrently
+  // (not awaited between) to mirror HomeKit's concurrent dispatch — this is what
+  // lets a setpoint's guard check run before the off's optimistic update lands.
+  const p1 = handler.setCoolingThresholdTemperature(25);
+  const p2 = handler.setActive(Characteristic.Active.INACTIVE);
+  const p3 = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.COOL);
+  const p4 = handler.setHeatingThresholdTemperature(21.2);
   await Promise.all([p1, p2, p3, p4]);
 
   const offIdx = sendCommandCalls.findIndex(isOff);
@@ -150,13 +147,15 @@ test('AC-off scene: no setpoint reaches the device after the off (unit stays off
     'no setpoint command may follow the off — a trailing bare setpoint revives the unit. ' +
       'Got: ' + JSON.stringify(sendCommandCalls.map((c) => c.commands)),
   );
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ operationMode: 'off' }],
+    'the captured mode rides along with the off instead of reviving the unit');
 });
 
 test('a threshold write dispatched right after an off is suppressed', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'cool' }));
 
-  const pOff = handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  const pOff = handler.setActive(Characteristic.Active.INACTIVE);
   const pSp = handler.setCoolingThresholdTemperature(25);
   await Promise.all([pOff, pSp]);
 

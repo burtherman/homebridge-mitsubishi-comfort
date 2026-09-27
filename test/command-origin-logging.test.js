@@ -33,7 +33,7 @@ function makeLog() {
 // Real hap-nodejs enum values (see test/helpers.js). The old per-file fake gave
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
-const Service = { AccessoryInformation: 'AccessoryInformation', Thermostat: 'Thermostat', Switch: 'Switch', FilterMaintenance: 'FilterMaintenance' };
+const { Service } = require('./helpers');
 
 function makeCharacteristic() { const ch = { value: undefined, onGet() { return ch; }, onSet() { return ch; }, setProps() { return ch; } }; return ch; }
 function makeService(type, name, subtype) {
@@ -113,7 +113,7 @@ test('a stale cloud replay after our own command is UNEXPECTED, never EXTERNAL',
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1 }));
 
   // HomeKit turns it off; the optimistic update moves cached state to off.
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  await handler.setActive(Characteristic.Active.INACTIVE);
 
   // The cloud lags ~7-10s and replays the pre-command "cool".
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1 }));
@@ -131,10 +131,10 @@ test('every command logs its origin', async () => {
   const { handler, log } = makeHarness();
   handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1 }));
 
-  await handler.setTargetHeatingCoolingState(Characteristic.TargetHeatingCoolingState.OFF);
+  await handler.setActive(Characteristic.Active.INACTIVE);
   const cmd = log.lines.filter((l) => l.startsWith('[CMD]'));
   assert.strictEqual(cmd.length, 1, `expected one [CMD] line, got: ${JSON.stringify(cmd)}`);
-  assert.match(cmd[0], /Living room <- homekit:mode/);
+  assert.match(cmd[0], /Living room <- homekit:active/);
   assert.match(cmd[0], /via cloud/);
   assert.match(cmd[0], /"operationMode":"off"/);
 });

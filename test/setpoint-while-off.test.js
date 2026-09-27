@@ -2,10 +2,11 @@
 
 // Regression test for the off-unit setpoint bug.
 //
-// HomeKit's Thermostat service sends TargetTemperature independently of
-// TargetHeatingCoolingState. When an automation (e.g. "turn off the AC when the
-// skylight opens") captures a thermostat's full state, opening the skylight
-// re-pushes each unit's last setpoint alongside `off`. The old code's off branch
+// HomeKit sends setpoints independently of power and mode (on the 1.x Thermostat:
+// TargetTemperature vs TargetHeatingCoolingState; on the 2.0 HeaterCooler: the
+// threshold temperatures vs Active). When an automation (e.g. "turn off the AC when
+// the skylight opens") captures a unit's full state, opening the skylight re-pushes
+// each unit's last setpoint alongside the off. The old code's off branch
 // sent a bare `{ spHeat: temp }` with no operationMode, which the Kumo v3 API
 // rejects with `modeRequiredWhenDeviceOff` (HTTP 400) — producing a cluster of
 // red errors on every skylight-open event even though the unit shut off fine.
@@ -28,12 +29,7 @@ function makeLog() {
 // every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
 const { Characteristic } = require('./helpers');
 
-const Service = {
-  AccessoryInformation: 'AccessoryInformation',
-  Thermostat: 'Thermostat',
-  Switch: 'Switch',
-  FilterMaintenance: 'FilterMaintenance',
-};
+const { Service } = require('./helpers');
 
 function makeCharacteristic() {
   const ch = {
@@ -117,12 +113,12 @@ const zone = (over = {}) => ({
   },
 });
 
-test('setting a target temperature while the unit is OFF sends no command', async () => {
+test('setting a setpoint while the unit is OFF sends no command', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   // Seed an OFF status the way a streaming/poll update would.
   handler.updateFromZone(zone({ power: 0, operationMode: 'off', spHeat: 20 }));
 
-  await handler.setTargetTemperature(21);
+  await handler.setHeatingThresholdTemperature(21.2);
 
   // Before the fix this was 1: a bare { spHeat: 21 } that the API rejected with
   // modeRequiredWhenDeviceOff. The unit is off, so nothing should be sent.
@@ -130,25 +126,25 @@ test('setting a target temperature while the unit is OFF sends no command', asyn
     'no API command should be sent when the unit is off');
 });
 
-test('setting a target temperature while OFF still echoes the value to HomeKit', async () => {
+test('setting a setpoint while OFF still echoes the value to HomeKit', async () => {
   const { handler, accessory } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off', spHeat: 20 }));
 
-  await handler.setTargetTemperature(21);
+  await handler.setHeatingThresholdTemperature(21.2);
 
-  const target = accessory.getService(Service.Thermostat)
-    .getCharacteristic(Characteristic.TargetTemperature);
-  assert.strictEqual(target.value, 21,
+  const target = accessory.getService(Service.HeaterCooler)
+    .getCharacteristic(Characteristic.HeatingThresholdTemperature);
+  assert.strictEqual(target.value, 21.2,
     'HomeKit target temperature still reflects the requested value (slider holds)');
 });
 
-test('setting a target temperature while HEATING still sends the setpoint (control)', async () => {
+test('setting a setpoint while HEATING still sends it (control)', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setTargetTemperature(22);
+  await handler.setHeatingThresholdTemperature(22.3);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'heat-mode setpoint is sent to the API');
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22 },
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
     'sends the heat setpoint with no spurious fields');
 });
