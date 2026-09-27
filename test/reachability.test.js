@@ -23,15 +23,9 @@ function makeLog() {
   return { info: noop, warn: noop, error: noop, debug: noop };
 }
 
-const charCache = {};
-const Characteristic = new Proxy({}, {
-  get(_t, prop) {
-    if (!charCache[prop]) {
-      charCache[prop] = { _name: String(prop), OFF: 0, HEAT: 1, COOL: 2, AUTO: 3 };
-    }
-    return charCache[prop];
-  },
-});
+// Real hap-nodejs enum values (see test/helpers.js). The old per-file fake gave
+// every characteristic AUTO=3, which is only true of TargetHeatingCoolingState.
+const { Characteristic } = require('./helpers');
 
 const Service = {
   AccessoryInformation: 'AccessoryInformation',
