@@ -37,6 +37,59 @@ export function toCloudCommands(commands: Commands): Commands {
   return wire;
 }
 
+/** What one legacy v2 credential fetch produced, reduced to what the log needs. */
+export type LegacyFetchOutcome =
+  | { kind: 'http'; status: number }
+  | { kind: 'ok'; count: number }
+  | { kind: 'error'; message: string };
+
+/**
+ * The log line for a legacy v2 fetch outcome, plus a dedupe key (see
+ * KumoAPI.noteLegacyOutcome). Failures are info: when v2 has nothing, the unit
+ * stays on cloud control, and the user needs to know why. A normal fetch stays
+ * at debug.
+ */
+export function describeLegacyFetch(outcome: LegacyFetchOutcome): {
+  key: string; level: 'info' | 'debug'; message: string;
+} {
+  switch (outcome.kind) {
+    case 'http':
+      if (outcome.status === 500) {
+        return {
+          key: 'http-500',
+          level: 'info',
+          message: '[LOCAL] Legacy v2 credential source returned HTTP 500. Kumo\'s legacy API does this for ' +
+            'accounts with no record from before the Comfort app, so it can\'t supply local-control ' +
+            'credentials for this account (see docs/LOCAL-CREDENTIAL-SOURCES.md on GitHub)',
+        };
+      }
+      return {
+        key: `http-${outcome.status}`,
+        level: 'info',
+        message: `[LOCAL] Legacy v2 credential source unavailable (HTTP ${outcome.status})`,
+      };
+    case 'error':
+      return {
+        key: 'error',
+        level: 'info',
+        message: `[LOCAL] Legacy v2 credential source unreachable: ${outcome.message}`,
+      };
+    case 'ok':
+      if (outcome.count === 0) {
+        return {
+          key: 'empty',
+          level: 'info',
+          message: '[LOCAL] Legacy v2 credential source returned no device credentials for this account',
+        };
+      }
+      return {
+        key: `ok-${outcome.count}`,
+        level: 'debug',
+        message: `Legacy v2 credential fetch: entries for ${outcome.count} device(s)`,
+      };
+  }
+}
+
 // Event callback types
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
@@ -69,6 +122,7 @@ export class KumoAPI {
   // adapterPasswords; the TTL keeps the minute-cadence cred retry off the wire.
   private legacyCredsCache: Map<string, { password: string; cryptoSerial: string }> | null = null;
   private legacyCredsFetchedAt = 0;
+  private lastLegacyOutcomeKey: string | null = null;
   private static readonly LEGACY_CREDS_TTL_MS = 6 * 60 * 60 * 1000;
   private adapterPasswordCallbacks: Set<(serial: string, password: string) => void> = new Set();
 
@@ -926,6 +980,12 @@ export class KumoAPI {
    * Cached for LEGACY_CREDS_TTL_MS: the cred-retry loop runs every minute and
    * must not hammer a legacy endpoint that changes rarely. Secrets are never
    * logged — counts only.
+   *
+   * v2 is a frozen snapshot of pre-Comfort-app account data: an account with no
+   * such record gets HTTP 500 for the CORRECT password (see
+   * docs/LOCAL-CREDENTIAL-SOURCES.md). That outcome is logged at info (via
+   * noteLegacyOutcome) — at debug it was invisible, and it's the one thing a user
+   * with no local control needs to see.
    */
   async fetchLegacyCredentials(): Promise<Map<string, { password: string; cryptoSerial: string }>> {
     const now = Date.now();
@@ -947,7 +1007,7 @@ export class KumoAPI {
         signal: controller.signal as unknown as RequestInit['signal'],
       });
       if (!response.ok) {
-        this.log.debug(`Legacy v2 credential fetch: HTTP ${response.status}`);
+        this.noteLegacyOutcome({ kind: 'http', status: response.status });
         return found;
       }
       const data = await response.json();
@@ -975,14 +1035,27 @@ export class KumoAPI {
       walk(data);
       this.legacyCredsCache = found;
       this.legacyCredsFetchedAt = now;
-      this.log.debug(`Legacy v2 credential fetch: entries for ${found.size} device(s)`);
+      this.noteLegacyOutcome({ kind: 'ok', count: found.size });
     } catch (error) {
-      this.log.debug(
-        `Legacy v2 credential fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.noteLegacyOutcome({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
       clearTimeout(timer);
     }
     return found;
+  }
+
+  /**
+   * Log a legacy v2 fetch outcome once per change. The cred retry refetches every
+   * minute while v2 keeps failing (failures aren't cached), so logging every
+   * attempt at info would flood the log with the same line.
+   */
+  private noteLegacyOutcome(outcome: LegacyFetchOutcome): void {
+    const { key, level, message } = describeLegacyFetch(outcome);
+    if (key === this.lastLegacyOutcomeKey) {
+      return;
+    }
+    this.lastLegacyOutcomeKey = key;
+    this.log[level](message);
   }
 
   onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {

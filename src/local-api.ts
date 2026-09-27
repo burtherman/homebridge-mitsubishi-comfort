@@ -492,15 +492,17 @@ export function candidateIpsByMac(
   return out;
 }
 
-type ProbeResult = 'match' | 'kumo' | null;
+export type ProbeResult = 'match' | 'kumo' | null;
 
 /**
  * Probe one IP with one device's token via a status read:
  *  - 'match' → the adapter authenticated this device (returns r.indoorUnit): IP found
- *  - 'kumo'  → a Kumo adapter, but a different device (returns _api_error)
- *  - null    → unreachable / not a Kumo adapter
+ *  - 'kumo'  → a Kumo adapter that rejected the token (returns _api_error). During a
+ *              sweep that means a different device; at the device's OWN address it
+ *              means its credential is wrong
+ *  - null    → no answer (timed out / refused) or not a Kumo adapter
  */
-async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
+export async function probeIpForSerial(ip: string, creds: SerialCreds, timeoutMs: number): Promise<ProbeResult> {
   // Same AbortController bounding as LocalKumoClient.request — a stalled body read
   // during a subnet sweep must not hang a discovery worker indefinitely.
   const controller = new AbortController();

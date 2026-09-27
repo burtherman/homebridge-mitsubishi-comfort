@@ -20,7 +20,7 @@ import { loadCredStore, saveCredStore } from './cred-store';
 import { KumoThermostatAccessory } from './accessory';
 import {
   LocalKumoClient, discoverDeviceIps, enumerateSubnet, SerialCreds,
-  parseArpTable, candidateIpsByMac,
+  parseArpTable, candidateIpsByMac, probeIpForSerial, ProbeResult,
 } from './local-api';
 import { MirrorController, MirrorStatePersistence } from './mirror';
 import { loadMirrorStore, saveMirrorStore } from './mirror-store';
@@ -730,7 +730,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     const candidates = enumerateSubnet(hostIp);
     this.log.info(`Local control: sweeping ${candidates.length} addresses on ${hostIp}'s subnet...`);
     this.admitResolved(await discoverDeviceIps(this.log, candidates, toDiscover, { warnUnfound: false }), toDiscover);
-    this.reportUnresolved(toDiscover);
+    await this.reportUnresolved(toDiscover);
   }
 
   /**
@@ -744,24 +744,45 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
    * That was a guess and it sent at least one debugging session down the wrong path.
    * No credential source we know of can refresh a stale key any more — see
    * docs/LOCAL-CREDENTIAL-SOURCES.md.
+   *
+   * ARP says where the unit is, not why the sweep missed it: a rejected credential
+   * and a probe that timed out look identical to discoverDeviceIps. So probe the
+   * known address once more and report which it was. A unit that answers this time
+   * was only slow, and is admitted instead of reported.
    */
-  private reportUnresolved(pending: Map<string, SerialCreds>): void {
+  private async reportUnresolved(pending: Map<string, SerialCreds>): Promise<void> {
     if (pending.size === 0) {
       return;
     }
     const macToIp = this.readArpTable();
-    for (const serial of pending.keys()) {
+    for (const [serial, creds] of [...pending]) {
       const mac = this.deviceMacs.get(serial);
       const ip = mac ? macToIp.get(mac.toLowerCase()) : undefined;
-      if (ip) {
+      if (!ip) {
+        this.log.warn(`[LOCAL] ${serial} could not be reached or authenticated locally — using cloud`);
+        continue;
+      }
+      const result = await this.probeLocal(ip, creds);
+      if (result === 'match') {
+        this.log.info(`[LOCAL] Discovered ${serial} at ${ip}`);
+        this.admitResolved(new Map([[serial, ip]]), pending);
+      } else if (result === 'kumo') {
         this.log.warn(
-          `[LOCAL] ${serial} is on the LAN at ${ip} but its local credential didn't authenticate — ` +
-          'using cloud (no known way to refresh it; see docs/LOCAL-CREDENTIAL-SOURCES.md)',
+          `[LOCAL] ${serial} is on the LAN at ${ip} but rejected its local credential — using cloud ` +
+          '(no known way to refresh it; see docs/LOCAL-CREDENTIAL-SOURCES.md on GitHub)',
         );
       } else {
-        this.log.warn(`[LOCAL] ${serial} could not be reached or authenticated locally — using cloud`);
+        this.log.warn(
+          `[LOCAL] ${serial} is on the LAN at ${ip} but didn't answer the local probe ` +
+          '(timed out or refused) — using cloud',
+        );
       }
     }
+  }
+
+  /** One signed status probe of `ip`. A method so tests can stub the network. */
+  private probeLocal(ip: string, creds: SerialCreds): Promise<ProbeResult> {
+    return probeIpForSerial(ip, creds, 3500);
   }
 
   /**
