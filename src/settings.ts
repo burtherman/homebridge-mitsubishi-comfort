@@ -142,22 +142,123 @@ export interface DeviceProfile {
   maximumSetPoints: { cool: number; heat: number; auto: number };
 }
 
+// ---- Vane and fan-speed vocabularies --------------------------------------
+// Portions derived from homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0,
+// src/settings.ts @ 83dfd18), modified.
+//
+// Both lists were verified by write test on the fork author's four units
+// (MLZ-KX06NL-U1 x2, MLZ-KX12NL-U1, MSZ-GX06NL-U1): the local adapter accepted every
+// value. They are the ONLY validation layer: the adapter answers HTTP 200 to
+// `vaneDir:"notARealVane"` and silently ignores it, so a typo is an invisible no-op.
+// Validate (isVaneDirection / isFanSpeed) before every write.
+
+/**
+ * Vane (louver) positions in physical order: 'horizontal' is the flattest blade
+ * angle, 'vertical' the most downward, with three steps between. 'auto' (unit
+ * decides) and 'swing' (continuous sweep) aren't fixed angles.
+ */
+export type VaneDirection =
+  | 'auto'
+  | 'horizontal'
+  | 'midhorizontal'
+  | 'midpoint'
+  | 'midvertical'
+  | 'vertical'
+  | 'swing';
+
+export const VANE_DIRECTIONS: readonly VaneDirection[] = [
+  'auto',
+  'horizontal',
+  'midhorizontal',
+  'midpoint',
+  'midvertical',
+  'vertical',
+  'swing',
+];
+
+export function isVaneDirection(v: unknown): v is VaneDirection {
+  return typeof v === 'string' && (VANE_DIRECTIONS as readonly string[]).includes(v);
+}
+
+/** Named fan speeds the adapter accepts. */
+export type FanSpeed = 'auto' | 'superQuiet' | 'quiet' | 'low' | 'powerful' | 'superPowerful';
+
+/**
+ * Indices 1..5 are the airflow ladder in ascending order. 'auto' (index 0) is "let
+ * the unit decide", not an airflow level, so anything mapping speeds onto a slider
+ * must rank only `FAN_SPEEDS.slice(1)`.
+ *
+ * The profile's `numberOfFanSpeeds` is advisory and must not gate this list: on the
+ * fork author's units, one reporting 3 accepted all five named speeds.
+ */
+export const FAN_SPEEDS: readonly FanSpeed[] = [
+  'auto',
+  'superQuiet',
+  'quiet',
+  'low',
+  'powerful',
+  'superPowerful',
+];
+
+export function isFanSpeed(v: unknown): v is FanSpeed {
+  return typeof v === 'string' && (FAN_SPEEDS as readonly string[]).includes(v);
+}
+
+/**
+ * Match a fan speed REPORTED by a unit against the vocabulary, ignoring case.
+ * Read path only: pykumo lists both `low` and `Low`, and some units report the
+ * capitalised form. Writes go out in the canonical lower-camel form.
+ *
+ * Returns undefined for an unknown speed. Callers must not treat that as 'auto',
+ * which would misreport the unit's real state.
+ */
+export function normalizeFanSpeed(v: unknown): FanSpeed | undefined {
+  if (typeof v !== 'string') {
+    return undefined;
+  }
+  const lower = v.toLowerCase();
+  return FAN_SPEEDS.find((f) => f.toLowerCase() === lower);
+}
+
 export interface Commands {
   spHeat?: number;
   spCool?: number;
   operationMode?: 'off' | 'heat' | 'cool' | 'auto' | 'vent' | 'dry';
-  fanSpeed?: 'auto' | 'low' | 'medium' | 'high';
-  // A verbatim adapter/cloud fan-speed string (e.g. 'quiet', 'powerful'). Used by
-  // the mirror path to copy a fan speed faithfully without collapsing it through
-  // the coarse `fanSpeed` enum. Takes precedence over `fanSpeed` on the local path;
+  // Was a coarse 'auto'|'low'|'medium'|'high' enum, translated by a lossy mapping in
+  // local-api.ts (coarse 'low' meant the adapter's 'quiet'). Nothing ever produced it:
+  // every fan write so far is the mirror's `fanSpeedRaw`. Now the adapter's own
+  // vocabulary, validated at both write boundaries.
+  fanSpeed?: FanSpeed;
+  // A verbatim fan-speed string copied from a source unit by the mirror. Not
+  // validated: the source reported it, so the hardware produces it, even if it's a
+  // value FAN_SPEEDS doesn't list. Takes precedence over `fanSpeed` on the local path;
   // folded into `fanSpeed` on the cloud path (see toCloudCommands).
   fanSpeedRaw?: string;
+  // Vane/louver position. The local field is `vaneDir`; the cloud calls the same
+  // thing `airDirection` (translated in toCloudCommands).
+  vaneDir?: VaneDirection;
+  power?: 0 | 1;
+}
+
+/**
+ * The cloud wire shape for `POST /devices/send-command`. Not `Commands`: the cloud
+ * names the vane field `airDirection` and has no `fanSpeedRaw`. toCloudCommands
+ * translates.
+ */
+export interface CloudCommands {
+  spHeat?: number;
+  spCool?: number;
+  operationMode?: Commands['operationMode'];
+  // Verbatim, not narrowed to FanSpeed: a mirrored value may be one FAN_SPEEDS
+  // doesn't list, and the cloud accepts whatever the unit reported.
+  fanSpeed?: string;
+  airDirection?: VaneDirection;
   power?: 0 | 1;
 }
 
 export interface SendCommandRequest {
   deviceSerial: string;
-  commands: Commands;
+  commands: CloudCommands;
 }
 
 export interface SendCommandResponse {

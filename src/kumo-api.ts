@@ -14,26 +14,40 @@ import {
   DeviceStatus,
   DeviceProfile,
   Commands,
+  CloudCommands,
   SendCommandRequest,
   SendCommandResponse,
+  isVaneDirection,
 } from './settings';
 
 /**
- * Translate internal Commands to the cloud wire shape. The mirror path carries a
- * verbatim adapter fan-speed string in `fanSpeedRaw`; the cloud expects `fanSpeed`,
- * so fold it in (and drop `fanSpeedRaw`) before posting. Best-effort — the cloud
- * reports these same strings, so echoing one back is accepted. Returns the input
- * unchanged when there is no `fanSpeedRaw` to translate.
+ * Translate internal Commands to the cloud wire shape:
+ *  - the mirror's verbatim `fanSpeedRaw` folds into `fanSpeed` (the cloud reports
+ *    these same strings, so echoing one back is accepted);
+ *  - `vaneDir` (the local field name) becomes `airDirection` (the cloud's name).
+ *
+ * Throws on an out-of-vocabulary vane direction, like buildLocalCommandBody. Both
+ * write boundaries must validate: a bad value rejected only by the local path would
+ * be retried against the cloud by sendDeviceCommand's fallback and reach the unit.
+ * (Ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
+ *
+ * Returns the input unchanged when there's nothing to translate.
  */
-export function toCloudCommands(commands: Commands): Commands {
-  if (commands.fanSpeedRaw === undefined) {
+export function toCloudCommands(commands: Commands): CloudCommands {
+  if (commands.fanSpeedRaw === undefined && commands.vaneDir === undefined) {
     return commands;
   }
-  const wire: Commands = { ...commands };
-  if (wire.fanSpeed === undefined) {
-    wire.fanSpeed = wire.fanSpeedRaw as Commands['fanSpeed'];
+  const { fanSpeedRaw, vaneDir, ...rest } = commands;
+  const wire: CloudCommands = { ...rest };
+  if (fanSpeedRaw !== undefined && wire.fanSpeed === undefined) {
+    wire.fanSpeed = fanSpeedRaw;
   }
-  delete wire.fanSpeedRaw;
+  if (vaneDir !== undefined) {
+    if (!isVaneDirection(vaneDir)) {
+      throw new Error(`Invalid vane direction "${vaneDir}" — the cloud would accept and ignore it`);
+    }
+    wire.airDirection = vaneDir;
+  }
   return wire;
 }
 

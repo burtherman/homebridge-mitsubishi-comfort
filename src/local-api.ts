@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import fetch, { RequestInit } from 'node-fetch';
 import { Logger } from 'homebridge';
-import { Commands, DeviceStatus } from './settings';
+import { Commands, DeviceStatus, isFanSpeed, isVaneDirection } from './settings';
 
 /**
  * Local LAN control of Mitsubishi Kumo adapters.
@@ -80,6 +80,11 @@ export function computeLocalToken(passwordB64: string, cryptoSerialHex: string, 
  * Build the local command body for a set of our cloud-shaped Commands.
  * Maps `operationMode` → `mode`, rounds setpoints to 0.1°C, and DROPS `power`
  * (local control expresses on/off purely through `mode`).
+ *
+ * Throws on an out-of-vocabulary fan speed or vane direction. The adapter answers
+ * HTTP 200 to `vaneDir:"notARealVane"` and silently ignores it, so a dropped bad
+ * value would be an invisible no-op. Throwing also aborts before any I/O.
+ * (Validation ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
  */
 export function buildLocalCommandBody(commands: Commands): Buffer {
   const status: Record<string, unknown> = {};
@@ -100,22 +105,21 @@ export function buildLocalCommandBody(commands: Commands): Buffer {
     // 'low'/'auto' overlap between the two vocabularies with different meanings).
     status.fanSpeed = commands.fanSpeedRaw;
   } else if (commands.fanSpeed !== undefined) {
-    status.fanSpeed = mapFanSpeedToLocal(commands.fanSpeed);
+    // Same vocabulary locally and in the cloud, so nothing to translate; just validate.
+    if (!isFanSpeed(commands.fanSpeed)) {
+      throw new Error(`Invalid fan speed "${commands.fanSpeed}" — the adapter would accept and ignore it`);
+    }
+    status.fanSpeed = commands.fanSpeed;
+  }
+  if (commands.vaneDir !== undefined) {
+    if (!isVaneDirection(commands.vaneDir)) {
+      throw new Error(`Invalid vane direction "${commands.vaneDir}" — the adapter would accept and ignore it`);
+    }
+    status.vaneDir = commands.vaneDir; // local `vaneDir` == cloud `airDirection`
   }
   // Note: commands.power is intentionally ignored — `mode` carries on/off locally.
 
   return Buffer.from(JSON.stringify({ c: { indoorUnit: { status } } }), 'utf8');
-}
-
-/** Our coarse cloud fan-speed vocabulary → the adapter's local fan-speed strings. */
-function mapFanSpeedToLocal(speed: NonNullable<Commands['fanSpeed']>): string {
-  switch (speed) {
-    case 'auto': return 'auto';
-    case 'low': return 'quiet';
-    case 'medium': return 'low';
-    case 'high': return 'powerful';
-    default: return 'auto';
-  }
 }
 
 /**
