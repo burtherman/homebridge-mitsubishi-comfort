@@ -16,11 +16,11 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **95% reduction in API calls** when streaming is healthy (optimal mode)
 - **Real-time streaming updates** via Socket.IO for instant status changes
 - **Adaptive polling** that activates only when streaming fails
-- Full HomeKit thermostat integration — Heat, Cool, Auto, and Off
-- **Auto-mode temperature range** — a two-handle heat/cool band in HomeKit's Auto mode
-- **Fan-only and Dry (dehumidify) modes** — exposed as per-unit switches (HomeKit's thermostat has no state for them)
-- **0.1°C setpoint resolution** for faithful °F round-tripping between Home and the Kumo app
-- Current temperature and humidity display, plus a filter-change indicator
+- **Each unit is a HomeKit heater-cooler** (since 2.0): power on/off separate from Heat / Cool / Auto, and a real Idle state when the compressor rests. Power-on returns to the unit's last mode
+- **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
+- **Fan-only and Dry (dehumidify) modes** as per-unit switches (HomeKit's heater-cooler has no mode for them)
+- **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
+- Current temperature, a humidity sensor on units that have one, and a filter-change indicator
 - **Offline units show "No Response"** instead of a stale reading when the cloud reports the unit's Wi-Fi adapter disconnected (unless it's still reachable over the LAN)
 - Automatic token refresh
 - Multi-site and multi-zone support
@@ -49,6 +49,16 @@ npm install
 npm run build
 npm link
 ```
+
+## Upgrading to 2.0
+
+2.0 changes each unit's HomeKit tile from a **thermostat** to a **heater-cooler**. Your units keep their names and rooms, but HomeKit treats the climate controls as new:
+
+- **Automations and scenes that controlled a unit's thermostat stop working and need to be recreated.** Open each one in the Home app after upgrading and set the unit again (for example "Kitchen: Off").
+- **Automations on the Dry and Fan switches keep working.** Those switches are unchanged.
+- Power is now its own control. An "off" automation sets the unit to Off regardless of its mode, including dry and fan-only.
+
+If the Home app still shows the old thermostat, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough to clear HomeKit's cache.
 
 ## Configuration
 
@@ -86,6 +96,9 @@ Add the following to your Homebridge `config.json`:
 | `localPollInterval` | number | No | Seconds between local status polls when `localControl` is on (default: 15, minimum: 5, maximum: 120) |
 | `localControlIps` | object | No | Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units |
 | `mirror` | array | No | **Opt-in (default: absent).** `{ source, target }` device-serial pairs; the target follows the source. See [Device Mirroring](#device-mirroring) |
+| `showDrySwitch` | boolean | No | Show a "Dry" switch on units that support dehumidify (default: true) |
+| `showFanOnlySwitch` | boolean | No | Show a "Fan" switch on units that support fan-only mode (default: true) |
+| `showHumiditySensor` | boolean | No | Show indoor humidity as a humidity sensor on units that report it (default: true). Turn off if it crowds the unit's tile in the Home app |
 
 ### Recommended Configuration for Optimal Efficiency
 
@@ -129,7 +142,7 @@ When `debug: true` is enabled, the plugin will log detailed information includin
 
 - **Temperature Display Differences (°F)**: HomeKit stores temperatures in Celsius and converts to °F for display, while the units operate in 0.5°C steps. This can make the same value show as e.g. 72°F in one app and 73°F in the other.
 
-  **Setpoints:** the plugin uses a **0.1°C step** so a value you set in the Home app stores a Celsius value that round-trips back to the same °F — largely eliminating the setpoint mismatch. (The units accept finer-than-0.5°C setpoints; this was verified against real hardware.) Note this only refines *new* changes you make in HomeKit; existing setpoints keep whatever value they were last set to.
+  **Setpoints:** every setpoint you set in HomeKit is stored as the Celsius value that displays as the same whole °F in both apps (72°F is stored as 22.3°C). The Home app rounds when it converts, while the Comfort app truncates, so a plain round-to-0.1 (22.2°C, 71.96°F) showed 72 in one and 71 in the other. The units accept 0.1°C setpoints (verified against real hardware). This only applies to *new* changes made in HomeKit; existing setpoints keep whatever value they were last set to.
 
   **Current temperature:** the indoor units report their measured room temperature only in **0.5°C steps** (a hardware limit), so the displayed current temperature can still differ by ~1°F between apps. There's no setting that changes this — it's the resolution the unit reports.
 
@@ -201,16 +214,22 @@ Notes:
 - Vane/louver direction, room temperature, and humidity are **not** mirrored (those are sensor readings, not settings).
 - Like `localControl`, `mirror` is read from the **parent** Homebridge config, so changing it requires a **full Homebridge restart**.
 
-## HomeKit Modes & Switches
+## HomeKit Tile, Modes & Switches
 
-HomeKit's thermostat service only models Off / Heat / Cool / Auto, so some unit features are surfaced differently:
+Each unit is a HomeKit **heater-cooler**:
 
-- **Auto mode shows a temperature range.** In Auto, the Home app presents a two-handle band — the lower handle is the heat setpoint, the upper is the cool setpoint (via `HeatingThresholdTemperature` / `CoolingThresholdTemperature`).
-- **Fan-only** is a separate **"Fan" switch** per unit (added only on units that support vent mode). On = fan only; off = the unit powers down.
-- **Dry (dehumidify)** is a separate **"Dry" switch** per unit (added only on units that support dry mode). On units that support a dry setpoint, the thermostat's target temperature controls it. Fan and Dry are mutually exclusive.
+- **Power** is its own control. Turning a unit on returns it to the mode it was last in.
+- **Modes** are Heat, Cool and Auto, limited to what the unit supports (a cooling-only unit offers only Cool).
+- **Setpoints:** Heat shows the heat setpoint, Cool shows the cool setpoint, and Auto shows both as a two-handle band. Each is limited to the range the unit reports for that mode.
+- **Status** shows Heating, Cooling or Idle. Idle means the unit is on but the compressor is resting, or it's in fan-only mode.
+- **Fan-only** is a separate **"Fan" switch** per unit (on units that support it). On = fan only; off = the unit powers down.
+- **Dry (dehumidify)** is a separate **"Dry" switch** per unit (on units that support it). While drying, the tile shows Cool, and its cool setpoint is the dry setpoint on units that have one. Fan and Dry are mutually exclusive.
+- **Humidity** appears as a humidity sensor on units that report it.
 - **Filter indicator.** A filter-change indication appears when the unit reports its filter needs cleaning.
 
-> **Note:** HomeKit caches an accessory's services. If a newly-supported switch or the Auto range doesn't appear after an update, reboot your Home hub (Apple TV/HomePod) or the iOS device to refresh its cache.
+A scene that turns a unit on and sets its mode and temperature at once ("on, cool, 72") is sent to the unit as one command, so the parts can't arrive out of order.
+
+> **Note:** HomeKit caches an accessory's services. If a newly-supported switch or sensor doesn't appear after an update, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough.
 
 ## Development
 
@@ -232,7 +251,7 @@ This will compile TypeScript, link the plugin, and restart on changes.
 
 1. **Authentication**: The plugin logs in to the Kumo Cloud v3 API using your credentials
 2. **Token Management**: Access tokens are automatically refreshed every 15 minutes
-3. **Discovery**: All sites and zones are discovered and registered as HomeKit thermostats
+3. **Discovery**: All sites and zones are discovered and registered as HomeKit heater-coolers
 4. **Real-time Streaming**: Establishes Socket.IO connection for instant device updates
 5. **Intelligent Fallback**:
    - **Normal Mode** (streaming healthy): Updates via streaming only, minimal API calls
@@ -252,13 +271,9 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 ## Supported Characteristics
 
-- Current Temperature
-- Target Temperature (0.1°C step)
-- Heating / Cooling Threshold Temperature (the two-handle Auto range)
-- Current Heating/Cooling State
-- Target Heating/Cooling State (Off, Heat, Cool, Auto)
-- Current Relative Humidity (when the unit has a sensor)
-- Filter Change Indication (when reported)
+- Heater Cooler: Active (power), Current Heater Cooler State (Inactive, Idle, Heating, Cooling), Target Heater Cooler State (Auto, Heat, Cool), Current Temperature, Heating / Cooling Threshold Temperature
+- Humidity Sensor: Current Relative Humidity (when the unit has a sensor)
+- Filter Maintenance: Filter Change Indication (when reported)
 - "Fan" and "Dry" switches (per unit, capability-gated)
 
 ## API Endpoints Used
