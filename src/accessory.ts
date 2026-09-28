@@ -1,7 +1,10 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
-import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState } from './settings';
+import {
+  POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
+  FanSpeed, FAN_SPEEDS, normalizeFanSpeed,
+} from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 
 // HeaterCooler implementation (2.0): portions derived from
@@ -18,10 +21,24 @@ export type CommandOrigin =
   | 'homekit:threshold'
   | 'homekit:fan-switch'
   | 'homekit:dry-switch'
+  | 'homekit:fan'
   | 'mirror';
 
 type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
 type SetpointField = 'spHeat' | 'spCool';
+
+/** One burst of HomeKit writes for power, mode and fan, resolved into one command. */
+type Intent = { active?: boolean; mode?: 'heat' | 'cool' | 'auto'; fanAuto?: boolean; fanSpeed?: FanSpeed };
+
+/**
+ * Fan slider step: five real speeds at 0/25/50/75/100, one position each. 0 is the
+ * quietest speed, not off: power lives on the climate tile's Active, and routing an
+ * off through the fan would put the heat pump within reach of a command aimed at
+ * "the fan" (see setFanActive). All five speeds are offered whatever the profile's
+ * `numberOfFanSpeeds` says; the fork found it advisory on its units (verify on ours).
+ * (Ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
+ */
+const FAN_PCT_STEP = 25;
 
 /**
  * Collapse power + operationMode into the one label that matters for "is it on,
@@ -62,16 +79,23 @@ export class KumoThermostatAccessory {
   private fanOnlyService: Service | null = null;
   private dryService: Service | null = null;
   private humidityService: Service | null = null;
+  // Fanv2 service carrying fan speed (RotationSpeed) and auto/manual (TargetFanState),
+  // linked to the HeaterCooler. HeaterCooler itself can't express "fan auto".
+  private fanService: Service | null = null;
+  private targetFanStateRegistered = false;
+  // TargetFanState MANUAL has to pick a speed, and in auto the slider still needs a
+  // position: the last real speed the unit was seen at.
+  private lastManualFan: FanSpeed = 'quiet';
   private modelNumberSet: boolean = false;
 
-  // Power and mode writes arriving in one HomeKit request, combined into one command.
+  // Power, mode and fan writes arriving in one HomeKit request, combined into one command.
   // hap-nodejs dispatches every handler in a write request concurrently without
   // awaiting any of them, so a scene's Active=1 and TargetHeaterCoolerState=COOL
   // land in arbitrary order. Sent separately, the power-on picked a mode of its own
   // and raced the explicit one. Buffering to the next tick makes the burst one
-  // intent. See queuePowerMode.
-  private pendingPowerMode: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' } | null = null;
-  private powerModeFlush: Promise<void> | null = null;
+  // intent. See queueIntent.
+  private pendingIntent: Intent | null = null;
+  private intentFlush: Promise<void> | null = null;
   // Setpoints HomeKit wrote while the unit was off, which can't be sent on their own
   // (the API 400s a bare setpoint on an off unit). A scene that turns a unit on with
   // "cool, 72" delivers the 72 while the unit is still off; if it arrived in the same
@@ -191,6 +215,9 @@ export class KumoThermostatAccessory {
       .onGet(this.getCoolingThresholdTemperature.bind(this))
       .onSet(this.setCoolingThresholdTemperature.bind(this));
 
+    // Fan speed and auto/manual live on a linked Fanv2 service (see setupFanService).
+    this.setupFanService();
+
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
 
@@ -206,6 +233,7 @@ export class KumoThermostatAccessory {
       this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
         .onGet(this.getFanOnlyOn.bind(this))
         .onSet(this.setFanOnlyOn.bind(this));
+      this.renameLegacyFanSwitch();
     }
 
     // Same for a cached dry switch (see setupDrySwitch / hasModeDry).
@@ -275,6 +303,17 @@ export class KumoThermostatAccessory {
     const modes: number[] = profile.hasModeHeat ? [T.AUTO, T.HEAT, T.COOL] : [T.COOL];
     this.service.getCharacteristic(T).setProps({ validValues: modes });
 
+    // Fan auto/manual, only on units with an auto fan speed. Added after publish, so
+    // the accessory must be re-published for HomeKit to see it.
+    if (profile.hasFanSpeedAuto && !this.targetFanStateRegistered && this.fanService) {
+      this.fanService.getCharacteristic(this.platform.Characteristic.TargetFanState)
+        .onGet(this.getTargetFanState.bind(this))
+        .onSet(this.setTargetFanState.bind(this));
+      this.targetFanStateRegistered = true;
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed);
+      this.publishStructureChange();
+    }
+
     // Dry and fan-only have no HeaterCooler mode, so each stays a Switch on units
     // that support it. Shown by default (hide via config): they're the only
     // controls whose HomeKit automations survive the move from Thermostat.
@@ -341,7 +380,7 @@ export class KumoThermostatAccessory {
 
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
     const displayName = this.accessory.context.device.displayName;
-    const switchName = `${displayName} Fan`;
+    const switchName = `${displayName} Fan Only`;
 
     this.fanOnlyService =
       existing ||
@@ -368,6 +407,29 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.debug(`Added Fan-Only switch for ${this.accessory.displayName}`);
+  }
+
+  /**
+   * 1.x named the fan-only switch "<unit> Fan". With fan speed now on its own Fan
+   * control, that reads as a duplicate, so it becomes "<unit> Fan Only". Only a
+   * switch still carrying the old default name is renamed: a name set in the Home
+   * app (stored in ConfiguredName) is left alone. The subtype is unchanged, so
+   * automations on the switch keep working.
+   */
+  private renameLegacyFanSwitch(): void {
+    if (!this.fanOnlyService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const displayName = this.accessory.context.device.displayName;
+    const oldName = `${displayName} Fan`;
+    const configured = this.fanOnlyService.getCharacteristic(C.ConfiguredName).value;
+    if (configured !== undefined && configured !== null && configured !== '' && configured !== oldName) {
+      return;
+    }
+    const newName = `${displayName} Fan Only`;
+    this.fanOnlyService.setCharacteristic(C.Name, newName);
+    this.fanOnlyService.setCharacteristic(C.ConfiguredName, newName);
   }
 
   private removeFanOnlySwitch(): void {
@@ -818,6 +880,15 @@ export class KumoThermostatAccessory {
       this.service.updateCharacteristic(characteristic, err as never);
     }
     this.humidityService?.updateCharacteristic(C.CurrentRelativeHumidity, err as never);
+    if (this.fanService) {
+      const fanChars = [C.Active, C.CurrentFanState, C.RotationSpeed];
+      if (this.targetFanStateRegistered) {
+        fanChars.push(C.TargetFanState);
+      }
+      for (const characteristic of fanChars) {
+        this.fanService.updateCharacteristic(characteristic, err as never);
+      }
+    }
     this.fanOnlyService?.updateCharacteristic(C.On, err as never);
     this.dryService?.updateCharacteristic(C.On, err as never);
   }
@@ -833,6 +904,7 @@ export class KumoThermostatAccessory {
       this.service.updateCharacteristic(C.CurrentTemperature, this.currentStatus.roomTemp);
     }
     this.refreshThresholds(this.currentStatus);
+    this.syncFanCharacteristics(this.currentStatus.fanSpeed);
     if (this.humidityService && typeof this.currentStatus.humidity === 'number') {
       this.humidityService.updateCharacteristic(C.CurrentRelativeHumidity, this.currentStatus.humidity);
     }
@@ -1107,6 +1179,7 @@ export class KumoThermostatAccessory {
       // Both thresholds, every update: on HeaterCooler they're the setpoints in every
       // mode (heat shows spHeat, cool shows spCool, auto shows the band).
       this.refreshThresholds(status);
+      this.syncFanCharacteristics(status.fanSpeed);
 
       // Only update humidity if the device has a humidity sensor
       if (this.hasHumiditySensor && status.humidity !== null && status.humidity !== undefined) {
@@ -1222,6 +1295,8 @@ export class KumoThermostatAccessory {
       C.CurrentHeaterCoolerState, this.mapToCurrentHeaterCoolerState(this.currentStatus));
     this.service.updateCharacteristic(
       C.TargetHeaterCoolerState, this.mapToTargetHeaterCoolerState(this.currentStatus));
+    this.fanService?.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
+    this.fanService?.updateCharacteristic(C.CurrentFanState, this.mapToCurrentFanState(this.currentStatus));
   }
 
   /** Push both setpoints (thresholds) from a status, skipping missing values. */
@@ -1384,7 +1459,7 @@ export class KumoThermostatAccessory {
       // same scene burst must see the off (see offRequestedAt).
       this.noteModeIntent('off');
     }
-    return this.queuePowerMode({ active: on });
+    return this.queueIntent({ active: on });
   }
 
   async getCurrentHeaterCoolerState(): Promise<CharacteristicValue> {
@@ -1413,44 +1488,58 @@ export class KumoThermostatAccessory {
         return;
     }
     this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent ${mode.toUpperCase()}`);
-    return this.queuePowerMode({ mode });
+    return this.queueIntent({ mode });
   }
 
   /**
-   * Collect power and mode writes from one HomeKit request into one command.
+   * Collect power, mode and fan writes from one HomeKit request into one command.
    * hap-nodejs dispatches every handler in a write request concurrently, so they
    * all land here before the zero-delay timer fires. Every caller in the burst
    * gets the same promise, resolved once the command has been sent.
    */
-  private queuePowerMode(patch: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' }): Promise<void> {
-    this.pendingPowerMode = { ...(this.pendingPowerMode ?? {}), ...patch };
-    if (!this.powerModeFlush) {
-      this.powerModeFlush = new Promise<void>((resolve) => {
+  private queueIntent(patch: Intent): Promise<void> {
+    this.pendingIntent = { ...(this.pendingIntent ?? {}), ...patch };
+    if (!this.intentFlush) {
+      this.intentFlush = new Promise<void>((resolve) => {
         setTimeout(() => {
-          const intent = this.pendingPowerMode ?? {};
-          this.pendingPowerMode = null;
-          this.powerModeFlush = null;
-          this.flushPowerMode(intent)
-            .catch((err) => this.platform.log.error(`${this.accessory.displayName}: power/mode error:`, err))
+          const intent = this.pendingIntent ?? {};
+          this.pendingIntent = null;
+          this.intentFlush = null;
+          this.flushIntent(intent)
+            .catch((err) => this.platform.log.error(`${this.accessory.displayName}: power/mode/fan error:`, err))
             .then(resolve, resolve);
         }, 0);
       });
     }
-    return this.powerModeFlush;
+    return this.intentFlush;
+  }
+
+  /** The fan speed a burst asks for: explicit AUTO wins, then a slider speed, then (for MANUAL) the last real one. */
+  private resolveFan(intent: Intent): FanSpeed | undefined {
+    if (intent.fanAuto === true) {
+      return 'auto';
+    }
+    if (intent.fanSpeed) {
+      return intent.fanSpeed;
+    }
+    return intent.fanAuto === false ? this.lastManualFan : undefined;
   }
 
   /**
-   * Resolve one burst of power/mode intent into a single command:
-   *  - Active=0 wins: off, whatever mode came with it (an "AC off" scene re-sends
-   *    its captured mode alongside the off).
+   * Resolve one burst into a single command:
+   *  - Active=0 wins: off, whatever mode or fan speed came with it (an "AC off"
+   *    scene re-sends its captured mode, setpoints and fan speed alongside the off).
    *  - Active=1 with a mode: on in that mode. Without one: the last active mode.
    *  - A mode alone: on in that mode, unless it trails an off in the same scene
    *    burst, which would revive the unit the off just stopped.
+   *  - A fan change rides along with a power-on or mode change. On its own it's
+   *    sent only to a unit that's on (see flushFanOnly).
    * Turning on also carries any setpoint written while off in this same burst, so
    * "on, cool, 72" lands as one command at 72 instead of at the old setpoint.
    */
-  private async flushPowerMode(intent: { active?: boolean; mode?: 'heat' | 'cool' | 'auto' }): Promise<void> {
+  private async flushIntent(intent: Intent): Promise<void> {
     const name = this.accessory.displayName;
+    const fan = this.resolveFan(intent);
     let operationMode: 'off' | ActiveMode;
     if (intent.active === false) {
       operationMode = 'off';
@@ -1460,9 +1549,12 @@ export class KumoThermostatAccessory {
       if (this.offInFlight()) {
         this.platform.log.debug(`[MODE CHANGE] ${name}: an off is in flight — not sending ${intent.mode}`);
         setTimeout(() => this.refreshClimateCharacteristics(), 100);
+        this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
         return;
       }
       operationMode = intent.mode;
+    } else if (fan) {
+      return this.flushFanOnly(fan);
     } else {
       return;
     }
@@ -1479,13 +1571,19 @@ export class KumoThermostatAccessory {
       this.attachSameBurstSetpoints(commands, operationMode);
     }
     this.setpointsCachedWhileOff.clear();
+    if (operationMode !== 'off' && fan) {
+      commands.fanSpeed = fan;
+    }
 
     const origin: CommandOrigin = intent.active !== undefined ? 'homekit:active' : 'homekit:mode';
     const label = origin === 'homekit:active' ? 'ACTIVE' : 'MODE CHANGE';
     const success = await this.sendDeviceCommand(commands, origin);
     if (!success) {
       this.platform.log.error(`[${label}] ${name}: failed to set ${operationMode}`);
-      setTimeout(() => this.refreshClimateCharacteristics(), 100);
+      setTimeout(() => {
+        this.refreshClimateCharacteristics();
+        this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+      }, 100);
       return;
     }
 
@@ -1498,14 +1596,48 @@ export class KumoThermostatAccessory {
       if (commands.spCool !== undefined) {
         this.currentStatus.spCool = commands.spCool;
       }
+      if (commands.fanSpeed !== undefined) {
+        this.currentStatus.fanSpeed = commands.fanSpeed;
+      }
       this.rememberActiveMode(this.currentStatus);
       this.refreshClimateCharacteristics();
       this.refreshThresholds(this.currentStatus);
+      this.syncFanCharacteristics(this.currentStatus.fanSpeed);
     }
-    // Heat/cool/auto/off leave the Dry and Fan switches off; a power-on that
+    // Heat/cool/auto/off leave the Dry and Fan Only switches off; a power-on that
     // restored dry or fan-only turns its switch on.
     this.fanOnlyService?.updateCharacteristic(this.platform.Characteristic.On, this.isFanOnlyActive(this.currentStatus));
     this.dryService?.updateCharacteristic(this.platform.Characteristic.On, this.isDryActive(this.currentStatus));
+    this.notifyStatusListeners();
+  }
+
+  /**
+   * A fan change with no power or mode change in the same burst.
+   *
+   * Not sent to a unit that is off, or one being turned off. The fork this came from
+   * sends it anyway (it saw a fan-only write leave its own off units off), but our
+   * 1.7.2 notes record a bare, mode-less local write reviving an off unit, and a fan
+   * write has no mode either. Until that's verified on real hardware, an off unit's
+   * fan change is shown in HomeKit and dropped; the next status update restores the
+   * slider. A fan change in the same burst as a power-on is sent with it.
+   */
+  private async flushFanOnly(fan: FanSpeed): Promise<void> {
+    const name = this.accessory.displayName;
+    const off = !this.currentStatus || this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off';
+    if (this.offInFlight() || off) {
+      this.platform.log.debug(`[FAN] ${name}: unit is off / turning off — not sending fan "${fan}"`);
+      return;
+    }
+    const success = await this.sendDeviceCommand({ fanSpeed: fan }, 'homekit:fan');
+    if (!success) {
+      this.platform.log.error(`[FAN] ${name}: failed to set "${fan}"`);
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+      return;
+    }
+    if (this.currentStatus) {
+      this.currentStatus.fanSpeed = fan;
+    }
+    this.syncFanCharacteristics(fan);
     this.notifyStatusListeners();
   }
 
@@ -1527,6 +1659,146 @@ export class KumoThermostatAccessory {
       if (v !== undefined) {
         commands.spCool = v;
       }
+    }
+  }
+
+  // ---- Fanv2: speed and auto/manual ---------------------------------------
+  // (Ported from homebridge-mitsubishi-heatpump @ 83dfd18, modified: fan writes go
+  // through the shared power/mode queue, and aren't sent to an off unit.)
+
+  /**
+   * The Fanv2 service, linked to the HeaterCooler. HeaterCooler can't express "fan
+   * auto" (TargetFanState is a Fanv2 characteristic), which is why fan speed lives
+   * here: RotationSpeed for the five speeds, TargetFanState for auto/manual (added
+   * from the profile, see applyDeviceProfile). No publishStructureChange: this runs
+   * from the constructor, and Homebridge's own registration picks it up.
+   */
+  private setupFanService(): void {
+    if (this.fanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const name = `${this.accessory.context.device.displayName} Fan`;
+    const existing = this.accessory.getServiceById(this.platform.Service.Fanv2, 'airflow');
+    this.fanService = existing || this.accessory.addService(this.platform.Service.Fanv2, name, 'airflow');
+    // Name only: ConfiguredName isn't in Fanv2's characteristic set, and HAP warns.
+    this.fanService.setCharacteristic(C.Name, name);
+
+    this.fanService.getCharacteristic(C.Active)
+      .onGet(this.getFanActive.bind(this))
+      .onSet(this.setFanActive.bind(this));
+    this.fanService.getCharacteristic(C.CurrentFanState)
+      .onGet(this.getCurrentFanState.bind(this));
+    // minValue must stay 0: hap-nodejs rejects a write below minValue, and the Home
+    // app sends 0 when the slider is dragged to the bottom.
+    this.fanService.getCharacteristic(C.RotationSpeed)
+      .setProps({ minValue: 0, maxValue: 100, minStep: FAN_PCT_STEP })
+      .onGet(this.getRotationSpeed.bind(this))
+      .onSet(this.setRotationSpeed.bind(this));
+
+    this.linkSecondaryService(this.fanService);
+  }
+
+  /** Fan speed -> slider percent. 'auto' shows the last real speed (TargetFanState says auto). */
+  private fanSpeedToRotation(speed: string | undefined): number {
+    const known = normalizeFanSpeed(speed);
+    const shown = known && known !== 'auto' ? known : this.lastManualFan;
+    return (FAN_SPEEDS.indexOf(shown) - 1) * FAN_PCT_STEP;
+  }
+
+  /** Slider percent -> a real fan speed. Never 'auto'. */
+  private rotationToFanSpeed(pct: number): FanSpeed {
+    const i = Math.round(pct / FAN_PCT_STEP) + 1;
+    return FAN_SPEEDS[Math.min(Math.max(i, 1), FAN_SPEEDS.length - 1)];
+  }
+
+  async getFanActive(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    if (!this.currentStatus) {
+      return this.platform.Characteristic.Active.INACTIVE;
+    }
+    return this.mapToActive(this.currentStatus);
+  }
+
+  /**
+   * The fan tile's OFF is refused; its ON turns the unit on. A room-wide "turn off
+   * the fan" (Siri, a HomePod, a scene aimed at fans) must not shut down the heat
+   * pump, so power off belongs on the climate tile only. Home Assistant's HomeKit
+   * bridge rejects this write the same way.
+   */
+  async setFanActive(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const C = this.platform.Characteristic;
+    if (value === C.Active.INACTIVE) {
+      this.platform.log.info(
+        `[FAN] ${this.accessory.displayName}: ignoring a fan-tile OFF (use the unit's own tile to turn it off)`,
+      );
+      setTimeout(() => {
+        if (this.currentStatus) {
+          this.fanService?.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
+        }
+      }, 100);
+      return;
+    }
+    return this.setActive(value);
+  }
+
+  async getCurrentFanState(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.mapToCurrentFanState(this.currentStatus);
+  }
+
+  private mapToCurrentFanState(status: DeviceStatus | null): number {
+    const C = this.platform.Characteristic.CurrentFanState;
+    if (!status || this.mapToActive(status) === this.platform.Characteristic.Active.INACTIVE) {
+      return C.INACTIVE;
+    }
+    return status.standby === true ? C.IDLE : C.BLOWING_AIR;
+  }
+
+  async getTargetFanState(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    const C = this.platform.Characteristic.TargetFanState;
+    return normalizeFanSpeed(this.currentStatus?.fanSpeed) === 'auto' ? C.AUTO : C.MANUAL;
+  }
+
+  async setTargetFanState(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const auto = value === this.platform.Characteristic.TargetFanState.AUTO;
+    this.platform.log.info(`[FAN] ${this.accessory.displayName}: HomeKit sent ${auto ? 'AUTO' : 'MANUAL'}`);
+    return this.queueIntent({ fanAuto: auto });
+  }
+
+  async getRotationSpeed(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.fanSpeedToRotation(this.currentStatus?.fanSpeed);
+  }
+
+  async setRotationSpeed(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const speed = this.rotationToFanSpeed(value as number);
+    this.platform.log.info(`[FAN] ${this.accessory.displayName}: HomeKit sent ${value} -> "${speed}"`);
+    return this.queueIntent({ fanSpeed: speed });
+  }
+
+  /** Push every fan characteristic from one device fan speed. */
+  private syncFanCharacteristics(speed: string | undefined): void {
+    if (!this.fanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const known = normalizeFanSpeed(speed);
+    if (known && known !== 'auto') {
+      this.lastManualFan = known;
+    }
+    if (this.targetFanStateRegistered) {
+      this.fanService.updateCharacteristic(
+        C.TargetFanState, known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL);
+    }
+    this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
+    if (this.currentStatus) {
+      this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
+      this.fanService.updateCharacteristic(C.CurrentFanState, this.mapToCurrentFanState(this.currentStatus));
     }
   }
 
@@ -1813,6 +2085,7 @@ export class KumoThermostatAccessory {
       this.rememberActiveMode(this.currentStatus);
       this.refreshClimateCharacteristics();
       this.refreshThresholds(this.currentStatus);
+      this.syncFanCharacteristics(this.currentStatus.fanSpeed);
       if (this.dryService) {
         this.dryService.updateCharacteristic(
           this.platform.Characteristic.On,

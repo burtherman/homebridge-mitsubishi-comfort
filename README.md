@@ -18,7 +18,8 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Adaptive polling** that activates only when streaming fails
 - **Each unit is a HomeKit heater-cooler** (since 2.0): power on/off separate from Heat / Cool / Auto, and a real Idle state when the compressor rests. Power-on returns to the unit's last mode
 - **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
-- **Fan-only and Dry (dehumidify) modes** as per-unit switches (HomeKit's heater-cooler has no mode for them)
+- **Fan speed** on each unit's tile: five speeds plus Auto
+- **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry" switches (HomeKit's heater-cooler has no mode for them)
 - **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
 - Current temperature, a humidity sensor on units that have one, and a filter-change indicator
 - **Offline units show "No Response"** instead of a stale reading when the cloud reports the unit's Wi-Fi adapter disconnected (unless it's still reachable over the LAN)
@@ -55,7 +56,7 @@ npm link
 2.0 changes each unit's HomeKit tile from a **thermostat** to a **heater-cooler**. Your units keep their names and rooms, but HomeKit treats the climate controls as new:
 
 - **Automations and scenes that controlled a unit's thermostat stop working and need to be recreated.** Open each one in the Home app after upgrading and set the unit again (for example "Kitchen: Off").
-- **Automations on the Dry and Fan switches keep working.** Those switches are unchanged.
+- **Automations on the Dry and Fan switches keep working.** The "Fan" switch is renamed "Fan Only" (it means fan-only mode, not fan speed, which is now its own control), unless you renamed it yourself.
 - Power is now its own control. An "off" automation sets the unit to Off regardless of its mode, including dry and fan-only.
 
 If the Home app still shows the old thermostat, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough to clear HomeKit's cache.
@@ -97,7 +98,7 @@ Add the following to your Homebridge `config.json`:
 | `localControlIps` | object | No | Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units |
 | `mirror` | array | No | **Opt-in (default: absent).** `{ source, target }` device-serial pairs; the target follows the source. See [Device Mirroring](#device-mirroring) |
 | `showDrySwitch` | boolean | No | Show a "Dry" switch on units that support dehumidify (default: true) |
-| `showFanOnlySwitch` | boolean | No | Show a "Fan" switch on units that support fan-only mode (default: true) |
+| `showFanOnlySwitch` | boolean | No | Show a "Fan Only" switch on units that support fan-only mode (default: true) |
 | `showHumiditySensor` | boolean | No | Show indoor humidity as a humidity sensor on units that report it (default: true). Turn off if it crowds the unit's tile in the Home app |
 
 ### Recommended Configuration for Optimal Efficiency
@@ -222,12 +223,13 @@ Each unit is a HomeKit **heater-cooler**:
 - **Modes** are Heat, Cool and Auto, limited to what the unit supports (a cooling-only unit offers only Cool).
 - **Setpoints:** Heat shows the heat setpoint, Cool shows the cool setpoint, and Auto shows both as a two-handle band. Each is limited to the range the unit reports for that mode.
 - **Status** shows Heating, Cooling or Idle. Idle means the unit is on but the compressor is resting, or it's in fan-only mode.
-- **Fan-only** is a separate **"Fan" switch** per unit (on units that support it). On = fan only; off = the unit powers down.
+- **Fan speed** is a slider with five speeds (quietest at the bottom, most powerful at the top) and an Auto setting on units that support it. The fan's own on/off can turn the unit on but won't turn it off, so a room-wide "turn off the fan" can't shut down the heat pump. Use the unit's power control for that. A fan change on a unit that's off isn't sent; change it after turning the unit on, or in the same scene.
+- **Fan-only** is a separate **"Fan Only" switch** per unit (on units that support it). On = fan only; off = the unit powers down.
 - **Dry (dehumidify)** is a separate **"Dry" switch** per unit (on units that support it). While drying, the tile shows Cool, and its cool setpoint is the dry setpoint on units that have one. Fan and Dry are mutually exclusive.
 - **Humidity** appears as a humidity sensor on units that report it.
 - **Filter indicator.** A filter-change indication appears when the unit reports its filter needs cleaning.
 
-A scene that turns a unit on and sets its mode and temperature at once ("on, cool, 72") is sent to the unit as one command, so the parts can't arrive out of order.
+A scene that turns a unit on and sets its mode, temperature and fan speed at once ("on, cool, 72, fan quiet") is sent to the unit as one command, so the parts can't arrive out of order.
 
 > **Note:** HomeKit caches an accessory's services. If a newly-supported switch or sensor doesn't appear after an update, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough.
 
@@ -272,9 +274,10 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 ## Supported Characteristics
 
 - Heater Cooler: Active (power), Current Heater Cooler State (Inactive, Idle, Heating, Cooling), Target Heater Cooler State (Auto, Heat, Cool), Current Temperature, Heating / Cooling Threshold Temperature
+- Fan (linked to the heater-cooler): Active, Current Fan State, Rotation Speed (five speeds), Target Fan State (Auto/Manual, on units with an auto fan speed)
 - Humidity Sensor: Current Relative Humidity (when the unit has a sensor)
 - Filter Maintenance: Filter Change Indication (when reported)
-- "Fan" and "Dry" switches (per unit, capability-gated)
+- "Fan Only" and "Dry" switches (per unit, capability-gated)
 
 ## API Endpoints Used
 

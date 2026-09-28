@@ -96,6 +96,11 @@ function makeService(type, name, subtype) {
     },
     setCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
     updateCharacteristic(id, v) { svc.getCharacteristic(id).value = v; return svc; },
+    // Primary/linked services, as hap-nodejs's Service has them.
+    primary: false,
+    linked: [],
+    setPrimaryService(v = true) { svc.primary = v; },
+    addLinkedService(other) { if (!svc.linked.includes(other)) svc.linked.push(other); },
   };
   return svc;
 }

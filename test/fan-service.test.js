@@ -1,0 +1,247 @@
+'use strict';
+
+// Fan speed on the HeaterCooler (2.0 stage 5).
+//
+// HeaterCooler can't express "fan auto" (TargetFanState is a Fanv2 characteristic),
+// so fan speed lives on a Fanv2 service linked to the unit's tile: RotationSpeed for
+// five real speeds at 0/25/50/75/100, TargetFanState for auto/manual.
+//
+// Deliberate differences from the fork these tests are adapted from:
+//  - Fan writes go through the same one-burst queue as power and mode, so an
+//    "on, fan quiet" scene is one command and an "AC off" scene's captured fan
+//    speed is dropped with the off.
+//  - A fan change on its own is not sent to a unit that is off. The fork sends it
+//    (it saw its units stay off); our 1.7.2 notes record a bare local write reviving
+//    an off unit, and that hasn't been checked for fan writes on our hardware.
+//
+// Adapted from homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0,
+// test/fan-service.test.js @ 44fb5f5).
+
+const test = require('node:test');
+const assert = require('node:assert');
+const { KumoThermostatAccessory } = require('../dist/accessory.js');
+const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers');
+
+const SERIAL = 'TESTSERIAL001';
+const C = Characteristic;
+
+function makeHarness({ accessory = makeAccessory('Kitchen', SERIAL) } = {}) {
+  const sent = [];
+  const listened = [];
+  let profileCb = null;
+  const platform = { Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} } };
+  const kumoAPI = {
+    subscribeToDevice() {},
+    onDeviceProfileUpdate(cb) { profileCb = cb; },
+    sendCommand(serial, commands) {
+      sent.push(commands);
+      return Promise.resolve(true);
+    },
+  };
+  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  handler.onStatusUpdate((s) => listened.push(s.fanSpeed));
+  const fan = accessory.getServiceById(Service.Fanv2, 'airflow');
+  const tile = accessory.getService(Service.HeaterCooler);
+  return { handler, accessory, fan, tile, sent, listened, applyProfile: (p) => profileCb(SERIAL, p) };
+}
+
+const profile = (over = {}) => ({
+  numberOfFanSpeeds: 3, hasFanSpeedAuto: true, hasVaneDir: false, hasVaneSwing: false,
+  hasModeDry: true, hasModeHeat: true, hasModeVent: true, hasDefrost: true, hasStandby: true,
+  usesSetPointInDryMode: true,
+  minimumSetPoints: { heat: 16, cool: 19, auto: 17 },
+  maximumSetPoints: { heat: 31, cool: 30, auto: 30 },
+  ...over,
+});
+
+const zone = (over = {}) => ({
+  id: 'zone-1',
+  adapter: {
+    deviceSerial: SERIAL, rssi: -50, power: 1, operationMode: 'cool',
+    fanSpeed: 'low', airDirection: 'auto',
+    roomTemp: 24, spCool: 23, spHeat: 20, spAuto: null, humidity: null,
+    ...over,
+  },
+});
+
+// ---- Structure --------------------------------------------------------------
+
+test('the fan is its own Fanv2 service, linked to the primary HeaterCooler', () => {
+  const { fan, tile } = makeHarness();
+  assert.ok(fan, 'Fanv2 service with subtype "airflow"');
+  assert.strictEqual(tile.primary, true, 'the HeaterCooler is the primary service');
+  assert.ok(tile.linked.includes(fan), 'the fan is linked to it');
+  assert.strictEqual(tile.chars.has(C.RotationSpeed), false, 'no fan speed on the HeaterCooler itself');
+});
+
+test('auto/manual appears only on units with an auto fan speed', () => {
+  const withAuto = makeHarness();
+  withAuto.applyProfile(profile());
+  assert.ok(withAuto.fan.chars.has(C.TargetFanState));
+
+  const without = makeHarness();
+  without.applyProfile(profile({ hasFanSpeedAuto: false }));
+  assert.strictEqual(without.fan.chars.has(C.TargetFanState), false);
+});
+
+// ---- Slider <-> speed ---------------------------------------------------------
+
+test('the five speeds fill the slider evenly, one position each', async () => {
+  const { handler } = makeHarness();
+  const expected = { superQuiet: 0, quiet: 25, low: 50, powerful: 75, superPowerful: 100 };
+  for (const [speed, pct] of Object.entries(expected)) {
+    handler.updateFromZone(zone({ fanSpeed: speed }));
+    assert.strictEqual(await handler.getRotationSpeed(), pct, speed);
+  }
+});
+
+test('each slider position sends its own speed, and 0 is the quietest, not off', async () => {
+  const expected = { 0: 'superQuiet', 25: 'quiet', 50: 'low', 75: 'powerful', 100: 'superPowerful' };
+  for (const [pct, speed] of Object.entries(expected)) {
+    const { handler, sent } = makeHarness();
+    handler.updateFromZone(zone());
+    await handler.setRotationSpeed(Number(pct));
+    assert.deepStrictEqual(sent, [{ fanSpeed: speed }], `slider ${pct}`);
+  }
+});
+
+test('a capitalised speed reported by the unit reads back as its own position', async () => {
+  const { handler } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'Low' }));
+  assert.strictEqual(await handler.getRotationSpeed(), 50);
+});
+
+// ---- Auto / manual ------------------------------------------------------------
+
+test('auto shows on TargetFanState, and the slider keeps the last real speed', async () => {
+  const { handler, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+  handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+  assert.strictEqual(await handler.getTargetFanState(), C.TargetFanState.AUTO);
+  assert.strictEqual(await handler.getRotationSpeed(), 75, 'still at powerful, not zero');
+});
+
+test('switching to AUTO sends auto; back to MANUAL restores the last real speed', async () => {
+  const { handler, sent, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+  await handler.setTargetFanState(C.TargetFanState.AUTO);
+  await handler.setTargetFanState(C.TargetFanState.MANUAL);
+  assert.deepStrictEqual(sent, [{ fanSpeed: 'auto' }, { fanSpeed: 'powerful' }]);
+});
+
+test('an explicit AUTO beats a speed sent in the same burst, in either order', async () => {
+  for (const order of ['auto-first', 'speed-first']) {
+    const { handler, sent, applyProfile } = makeHarness();
+    applyProfile(profile());
+    handler.updateFromZone(zone());
+    const writes = [() => handler.setTargetFanState(C.TargetFanState.AUTO), () => handler.setRotationSpeed(25)];
+    if (order === 'speed-first') {
+      writes.reverse();
+    }
+    await Promise.all(writes.map((w) => w()));
+    assert.deepStrictEqual(sent, [{ fanSpeed: 'auto' }], order);
+  }
+});
+
+// ---- Power ---------------------------------------------------------------------
+
+test('the fan tile follows the unit\'s power', () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone({ power: 1 }));
+  assert.strictEqual(fan.getCharacteristic(C.Active).value, C.Active.ACTIVE);
+  assert.strictEqual(fan.getCharacteristic(C.CurrentFanState).value, C.CurrentFanState.BLOWING_AIR);
+  handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
+  assert.strictEqual(fan.getCharacteristic(C.Active).value, C.Active.INACTIVE);
+});
+
+test('turning the fan tile OFF does not turn the unit off', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone());
+  await handler.setFanActive(C.Active.INACTIVE);
+  assert.deepStrictEqual(sent, [], 'a room-wide "turn off the fan" must not shut down the heat pump');
+});
+
+test('turning the fan tile ON turns the unit on in its last mode', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'heat' }));
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await handler.setFanActive(C.Active.ACTIVE);
+  assert.deepStrictEqual(sent, [{ operationMode: 'heat' }]);
+});
+
+// ---- Off units and scenes ---------------------------------------------------
+
+test('a fan change on an off unit is not sent', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await handler.setRotationSpeed(75);
+  assert.deepStrictEqual(sent, []);
+});
+
+test('"on, fan quiet" from off is one command', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'cool' }));
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await Promise.all([handler.setRotationSpeed(25), handler.setActive(C.Active.ACTIVE)]);
+  assert.deepStrictEqual(sent, [{ operationMode: 'cool', fanSpeed: 'quiet' }]);
+});
+
+test('an "AC off" scene\'s captured fan speed is dropped with the off', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+  await Promise.all([handler.setRotationSpeed(25), handler.setActive(C.Active.INACTIVE)]);
+  assert.deepStrictEqual(sent, [{ operationMode: 'off' }]);
+});
+
+test('a fan change just after an off (a separate burst) is not sent', async () => {
+  const { handler, sent } = makeHarness();
+  handler.updateFromZone(zone());
+  await handler.setActive(C.Active.INACTIVE);
+  await handler.setRotationSpeed(100);
+  assert.deepStrictEqual(sent, [{ operationMode: 'off' }]);
+});
+
+// ---- Mirror, logging, reachability --------------------------------------------
+
+test('a HomeKit fan change notifies the mirror and is tagged homekit:fan', async () => {
+  const lines = [];
+  const accessory = makeAccessory('Kitchen', SERIAL);
+  const { handler, listened } = makeHarness({ accessory });
+  handler.platform.log = { ...makeLog(), info: (m) => lines.push(m) };
+  handler.updateFromZone(zone({ fanSpeed: 'low' }));
+  listened.length = 0;
+  await handler.setRotationSpeed(75);
+  assert.deepStrictEqual(listened, ['powerful']);
+  assert.ok(lines.some((l) => /\[CMD\] Kitchen <- homekit:fan/.test(l)), JSON.stringify(lines));
+});
+
+test('No Response covers the fan tile', () => {
+  const { handler, fan, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone());
+  handler.setCloudConnected(false);
+  for (const key of ['Active', 'RotationSpeed', 'TargetFanState', 'CurrentFanState']) {
+    assert.ok(fan.getCharacteristic(C[key]).value instanceof Error, `${key} pushed No Response`);
+  }
+});
+
+// ---- "Fan" switch renamed "Fan Only" ------------------------------------------
+
+test('a cached fan-only switch with the 1.x default name becomes "Fan Only"', () => {
+  const accessory = makeAccessory('Kitchen', SERIAL);
+  const sw = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
+  sw.setCharacteristic(C.Name, 'Kitchen Fan');
+  sw.setCharacteristic(C.ConfiguredName, 'Kitchen Fan');
+  makeHarness({ accessory });
+  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Kitchen Fan Only');
+});
+
+test('a fan-only switch renamed in the Home app keeps its name', () => {
+  const accessory = makeAccessory('Kitchen', SERIAL);
+  const sw = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
+  sw.setCharacteristic(C.ConfiguredName, 'Breeze');
+  makeHarness({ accessory });
+  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Breeze');
+});

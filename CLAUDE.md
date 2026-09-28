@@ -166,8 +166,8 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 
 Each unit is a `HeaterCooler` (was `Thermostat` through 1.x). Ported from the fork
 `homebridge-mitsubishi-heatpump` (ukaratay, Apache-2.0) with attribution — see NOTICE and
-`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stages 5–7 still to do:
-Fanv2 fan speed, vane, schema/docs/release).
+`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stages 6–7 still to do:
+vane, schema/docs/release).
 
 | HomeKit Characteristic | Kumo API Field | Notes |
 |----------------------|----------------|-------|
@@ -177,10 +177,13 @@ Fanv2 fan speed, vane, schema/docs/release).
 | CurrentTemperature | roomTemp | In Celsius |
 | HeatingThresholdTemperature | spHeat | THE heat setpoint in every mode (HEAT shows it; AUTO shows it as the low edge). Range = heat ∪ auto from the profile |
 | CoolingThresholdTemperature | spCool | THE cool setpoint in every mode, and the dry setpoint. Range = cool ∪ auto |
+| Fanv2 (subtype `airflow`).RotationSpeed | fanSpeed | 5 detents 0/25/50/75/100 = superQuiet/quiet/low/powerful/superPowerful. Never 'auto' |
+| Fanv2.TargetFanState | fanSpeed === 'auto' | AUTO/MANUAL; registered only if the profile has `hasFanSpeedAuto`. MANUAL restores `lastManualFan` |
+| Fanv2.Active / CurrentFanState | power/mode/standby | Follows the unit. **Fan-tile OFF is refused** (a room-wide "turn off the fan" must not stop the heat pump); ON = setActive(1) |
 | HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler |
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
-| Switch "Fan" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off` |
+| Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Named "Fan" in 1.x; renamed only if it still has the old default ConfiguredName |
 | Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan |
 
 There is **no TargetTemperature**. Removing that second writer is what stops a scene's
@@ -218,6 +221,25 @@ all units off) — rebuild it right after upgrading and verify from the log.
 - Checked against real hap-nodejs services inside a Homebridge `PlatformAccessory`
   (2026-09-27): no characteristic warnings from the HeaterCooler. The one remaining warning
   is pre-existing: `ConfiguredName` on the Switch services.
+
+### Fan speed (2.0 stage 5)
+
+- Fanv2 service (subtype `airflow`), linked to the HeaterCooler (which is primary). Ported
+  from the fork's final design (`setupFanService`, `fanSpeedToRotation`, `rotationToFanSpeed`,
+  `syncFanCharacteristics`, fan-tile OFF refusal).
+- **Fan writes share the power/mode queue** (`queueIntent` → `flushIntent` → `flushFanOnly`).
+  Explicit AUTO beats a slider speed in the same burst. With a power-on or mode change the fan
+  speed rides in the same command; with Active=0 it's dropped (an off scene's captured fan
+  speed would otherwise rewrite the unit's stored speed, the 1.8.2 class of bug).
+- **Deliberate deviation from the fork:** a fan change on its own is NOT sent to an off unit
+  (or one being turned off). The fork sends it, citing its own live test that a fan write left
+  an off unit off. Our 1.7.2 notes record a bare, mode-less LOCAL write reviving an off unit,
+  and a fan write has no mode either. Not verified on our hardware — revisit after checking a
+  fan-only write to an off unit over the LAN (then this can match the fork).
+- All five speeds are offered regardless of the profile's `numberOfFanSpeeds` (3 on our units).
+  The fork found it advisory on its units; the Pi checklist verifies each speed on each unit.
+- Origin label `homekit:fan`; every successful fan write notifies the mirror (fan speed is in
+  its signature).
 
 ### Setpoint writes are held briefly (since 1.8.2)
 

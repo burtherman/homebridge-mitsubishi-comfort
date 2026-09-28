@@ -1,7 +1,7 @@
 # 2.0: HeaterCooler, fan speed and vanes, ported from the fork
 
-**Status:** approved 2026-09-27. Stages 1–3 shipped in 1.10.4. Stage 4 (HeaterCooler core) done on
-branch `feat/heatercooler`, not released. Stages 5–7 remain before 2.0.0. README and CLAUDE.md on
+**Status:** approved 2026-09-27. Stages 1–3 shipped in 1.10.4. Stages 4 (HeaterCooler core) and 5 (fan
+speed) done on branch `feat/heatercooler`, not released. Stages 6–7 remain before 2.0.0. README and CLAUDE.md on
 that branch already describe stage 4.
 
 Stage 4 went beyond the plan: power and mode writes from one HomeKit request are combined into one
@@ -80,7 +80,8 @@ Each stage builds, passes `npm test`, and is committed before the next.
    13 Thermostat-bound test files using the fork's JS tests (`auto-setpoint`, `dry-off-thermostat`,
    `off-scene-*`, `setpoint-while-off`, `off-guard-mode`).
 5. **Fan service.** Fanv2 with 5 positions + Auto, fan-tile OFF refused, write coalescing
-   (fork 1539-1839). `fan-service.test.js`.
+   (fork 1539-1839). `fan-service.test.js`. Done: fan writes share the power/mode queue, and a
+   fan change alone isn't sent to an off unit (deviation from the fork; see CLAUDE.md).
 6. **Vane.** `SwingMode` on the tile, opt-in `Slats` (`exposeVaneSlat`, default off: Apple Home
    files Slats under window coverings). Add vane to the mirror signature, and **bump the mirror
    store to `version: 2`, discarding other versions on load**, or the first restart after upgrade
