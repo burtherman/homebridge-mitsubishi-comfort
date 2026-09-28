@@ -106,6 +106,9 @@ Each stage builds, passes `npm test`, and is committed before the next.
 
 ## Pi rollout checklist (2.0)
 
+0. **Update portal-dashboard first.** Its `mitsu_hap.py` reads/writes the Thermostat characteristics by
+   aid/iid and breaks the moment 2.0 lands. Make it handle both Thermostat and HeaterCooler, deploy it,
+   then upgrade the plugin. Brief: `~/.claude/handoffs/portal-dashboard/2026-09-27-2017.md`.
 1. Back up off the Pi: `accessories/cachedAccessories.0EA3CB05C3A2`, `persist/`,
    `mitsubishi-comfort-local-creds.json`, `mitsubishi-comfort-mirror-state.json`.
 2. Install a packed tarball; full Homebridge restart.
