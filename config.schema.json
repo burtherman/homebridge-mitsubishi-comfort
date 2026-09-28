@@ -82,7 +82,7 @@
         "title": "Enable Local Control (experimental)",
         "type": "boolean",
         "default": false,
-        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience. The cloud is still used for discovery, credentials, and as a per-unit fallback. Your Homebridge host must share a network with the units."
+        "description": "Control units directly over the LAN for lower latency and cloud-outage resilience, with the cloud as a per-unit fallback. Needs each unit's local credentials, which Mitsubishi no longer issues for accounts or units registered after the switch to the Comfort app; see the README. Your Homebridge host must share a network with the units."
       },
       "localPollInterval": {
         "title": "Local Poll Interval (seconds)",
@@ -100,7 +100,7 @@
       "mirror": {
         "title": "Device Mirroring",
         "type": "array",
-        "description": "Make one unit follow another. Whenever the source changes (via any control — wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
+        "description": "Make one unit follow another. Whenever the source changes (via any control — wall thermostat, Kumo app, or HomeKit), its full state (mode, setpoints, on/off, fan, and vane on targets that have one) is copied to the target. One-way; a manual change to the target holds until the source changes again.",
         "items": {
           "type": "object",
           "properties": {
@@ -119,6 +119,30 @@
           },
           "required": ["source", "target"]
         }
+      },
+      "showDrySwitch": {
+        "title": "Show Dry switches",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a \"Dry\" (dehumidify) switch on units that support it. The switch is on only while the unit is actually drying."
+      },
+      "showFanOnlySwitch": {
+        "title": "Show Fan Only switches",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a \"Fan Only\" switch on units that support fan-only mode (no heating or cooling). Fan speed is a separate control on the unit's tile."
+      },
+      "showHumiditySensor": {
+        "title": "Show humidity sensors",
+        "type": "boolean",
+        "default": true,
+        "description": "Show indoor humidity as a humidity sensor on units that report it. Turn off if it crowds the unit's tile in the Home app."
+      },
+      "exposeVaneSlat": {
+        "title": "Show vane tilt controls",
+        "type": "boolean",
+        "default": false,
+        "description": "Show a vane control with five fixed positions on units with movable vanes. Off by default: the Home app groups it with window coverings, so a \"close the blinds\" command can reach it. Swing on/off is on the unit's tile either way."
       }
     },
     "required": ["name", "username", "password"]
@@ -155,6 +179,13 @@
         },
         "debug"
       ]
+    },
+    {
+      "type": "fieldset",
+      "title": "HomeKit Display",
+      "expandable": true,
+      "expanded": false,
+      "items": ["showDrySwitch", "showFanOnlySwitch", "showHumiditySensor", "exposeVaneSlat"]
     },
     {
       "type": "fieldset",
