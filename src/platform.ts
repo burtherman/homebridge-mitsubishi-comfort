@@ -31,6 +31,11 @@ const LOCAL_CRED_INITIAL_WAIT_MS = 25000;
 const LOCAL_CRED_RETRY_MS = 60000;
 /** How long each retry pass waits for a nudged device to answer. */
 const LOCAL_CRED_RETRY_WAIT_MS = 10000;
+/**
+ * Longest a mirror source's first comparison waits for a LAN read after startup.
+ * Local startup normally takes ~60s (credential wait plus the LAN sweep).
+ */
+const MIRROR_LOCAL_WAIT_MAX_MS = 180000;
 
 /**
  * Why the platform config is unusable, or null if it's fine.
@@ -88,6 +93,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   public localClient: LocalKumoClient | null = null;
   private localPollTimer: NodeJS.Timeout | null = null;
   private localSerials: string[] = [];
+  // Set once local startup has finished (or failed); see mirrorWaitsForLocal.
+  private localStartupDone = false;
+  private mirrorLocalWaitUntil = 0;
+  private mirrorReleaseTimer: NodeJS.Timeout | null = null;
   // Wi-Fi adapter MAC per serial (from the cloud /status), cached so the MAC→IP
   // discovery fast-path doesn't re-hit the cloud on every retry pass.
   private deviceMacs: Map<string, string> = new Map();
@@ -198,6 +207,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (this.mirror) {
       this.mirror.destroy();
       this.mirror = null;
+      if (this.mirrorReleaseTimer) {
+        clearTimeout(this.mirrorReleaseTimer);
+        this.mirrorReleaseTimer = null;
+      }
     }
 
     // Clean up all site pollers
@@ -435,8 +448,10 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         // connects), then discovers each unit's IP. Never blocks startup, and
         // cloud streaming stays up as the per-unit fallback.
         if (this.kumoConfig.localControl) {
-          this.initLocalControl(allDeviceSerials).catch(err =>
-            this.log.error('Local control setup failed:', err));
+          this.initLocalControl(allDeviceSerials).catch(err => {
+            this.log.error('Local control setup failed:', err);
+            this.finishLocalStartup();
+          });
         }
       }
 
@@ -462,8 +477,14 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       // on an existing controller to avoid double-registering source listeners.
       if (!this.mirror && this.kumoConfig.mirror && this.kumoConfig.mirror.length > 0) {
         this.initMirrorStore();
+        this.mirrorLocalWaitUntil = Date.now() + MIRROR_LOCAL_WAIT_MAX_MS;
         this.mirror = new MirrorController(
-          this.log, this.kumoConfig.mirror, this.accessoryHandlers, undefined, this.mirrorPersistence());
+          this.log, this.kumoConfig.mirror, this.accessoryHandlers, undefined, this.mirrorPersistence(),
+          { waitForLocal: (serial) => this.mirrorWaitsForLocal(serial) });
+        if (this.kumoConfig.localControl) {
+          this.mirrorReleaseTimer = setTimeout(() => this.mirror?.releaseWaiting(), MIRROR_LOCAL_WAIT_MAX_MS + 100);
+          this.mirrorReleaseTimer.unref?.();
+        }
         this.log.info(`Device mirroring enabled for ${this.kumoConfig.mirror.length} pair(s)`);
       }
 
@@ -508,6 +529,29 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     // stragglers in the background and admit each one the moment its
     // credentials show up.
     this.scheduleLocalCredRetry();
+    this.finishLocalStartup();
+  }
+
+  /**
+   * Local startup is over, whatever came of it. Mirror sources that didn't make it
+   * onto the LAN stop waiting for a LAN read and compare using the cloud's state.
+   */
+  private finishLocalStartup(): void {
+    this.localStartupDone = true;
+    this.mirror?.releaseWaiting();
+  }
+
+  /**
+   * Whether a mirror source's first comparison should wait for a LAN read. The
+   * cloud's copy doesn't see LAN commands and can be minutes stale; see
+   * MirrorStartupGate. Waits for every source until local startup finishes, then
+   * only for sources on the LAN, and never past MIRROR_LOCAL_WAIT_MAX_MS.
+   */
+  private mirrorWaitsForLocal(serial: string): boolean {
+    if (!this.kumoConfig.localControl || Date.now() >= this.mirrorLocalWaitUntil) {
+      return false;
+    }
+    return !this.localStartupDone || (this.localClient?.hasLocal(serial) ?? false);
   }
 
   /**

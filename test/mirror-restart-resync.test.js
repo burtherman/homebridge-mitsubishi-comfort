@@ -30,7 +30,7 @@ function makeHandler(serial) {
     getDeviceSerial: () => serial,
     onStatusUpdate: (l) => { listener = l; },
     applyMirror: async (desired) => { applyCalls.push(desired); },
-    _fire: (status) => { if (listener) listener(status); },
+    _fire: (status, from) => { if (listener) listener(status, from); },
     applyCalls,
   };
 }
@@ -204,4 +204,73 @@ test('the store is saved as the current version and reloads', () => {
   saveMirrorStore(file, new Map([['SRC', 'heat|21|auto|v:auto']]), makeLog());
   assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).version, 2);
   assert.strictEqual(loadMirrorStore(file, makeLog()).get('SRC'), 'heat|21|auto|v:auto');
+});
+
+// ---- waiting for a LAN read (2026-09-27) ----------------------------------
+//
+// On a restart the cloud still had the kitchen heating: it had been turned off over
+// the LAN two minutes earlier, and the cloud doesn't see LAN commands. The saved
+// state said off, so the stale reading looked like "changed while down" and the
+// mirror started turning the living room on. A fresher cloud update cancelled it
+// inside the debounce, by luck. With LAN control on, the first comparison now waits
+// for a LAN read or a HomeKit command.
+
+const gate = (waiting) => ({ waitForLocal: () => waiting.value });
+
+test('a stale cloud reading at startup is not compared; the first LAN read decides', async () => {
+  const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
+  const persist = makePersist({ SRC: 'off' });
+  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15, persist,
+    gate({ value: true }));
+
+  src._fire(st({ operationMode: 'heat', spHeat: 22.5 }), 'polling');   // the cloud's stale copy
+  src._fire(st({ operationMode: 'heat', spHeat: 22.5 }), 'streaming');
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 0, 'no push from the cloud reading');
+  assert.strictEqual(persist._store.get('SRC'), 'off', 'saved state untouched while waiting');
+
+  src._fire(st({ operationMode: 'off', power: 0 }), 'local');         // the truth
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 0, 'unchanged since shutdown: seeds silently');
+});
+
+test('a first LAN read that differs from the saved state still re-syncs', async () => {
+  const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
+  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15,
+    makePersist({ SRC: 'off' }), gate({ value: true }));
+
+  src._fire(st({ operationMode: 'heat' }), 'streaming');
+  src._fire(st({ operationMode: 'cool', spCool: 24 }), 'local');
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 1);
+  assert.strictEqual(tgt.applyCalls[0].operationMode, 'cool');
+});
+
+test('a HomeKit command to the source during the wait is compared right away', async () => {
+  const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
+  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15,
+    makePersist({ SRC: 'off' }), gate({ value: true }));
+
+  src._fire(st({ operationMode: 'heat' }), 'command');
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 1);
+  assert.strictEqual(tgt.applyCalls[0].operationMode, 'heat');
+});
+
+test('releaseWaiting compares a source that never made it onto the LAN', async () => {
+  const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
+  const waiting = { value: true };
+  const mirror = new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15,
+    makePersist({ SRC: 'off' }), gate(waiting));
+
+  src._fire(st({ operationMode: 'heat' }), 'streaming');
+  mirror.releaseWaiting();                 // still waiting: nothing happens
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 0);
+
+  waiting.value = false;                   // local startup over; this source is cloud-only
+  mirror.releaseWaiting();
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 1, 'compared using the latest cloud state');
+  assert.strictEqual(tgt.applyCalls[0].operationMode, 'heat');
 });

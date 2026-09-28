@@ -67,11 +67,20 @@ const TILT_STEP = 45;
  * Collapse power + operationMode into the one label that matters for "is it on,
  * and doing what". power=0 is off whatever the mode field says.
  */
+/** Where an observed status came from: the cloud (streaming/polling), a LAN read, or our own command. */
+export type StatusSource = 'streaming' | 'polling' | 'local' | 'command';
+
 function powerModeLabel(s: { power?: number; operationMode?: string } | null): string {
   if (!s) {
     return 'unknown';
   }
   return s.power === 0 ? 'off' : (s.operationMode || 'unknown');
+}
+
+/** powerModeLabel with autoHeat/autoCool read as the 'auto' a command sends. */
+function syncLabel(s: { power?: number; operationMode?: string }): string {
+  const label = powerModeLabel(s);
+  return label.startsWith('auto') ? 'auto' : label;
 }
 
 export class KumoThermostatAccessory {
@@ -153,6 +162,11 @@ export class KumoThermostatAccessory {
   private lastCommandOrigin: CommandOrigin | null = null;
   private lastCommandLabel: string | null = null;
   private lastCommandAt = 0;
+  // Cloud sync after a LAN command; see scheduleCloudSync.
+  private readonly CLOUD_SYNC_DELAY_MS = 3000;
+  private readonly CLOUD_SYNC_WATCH_MS = 60000;
+  private cloudSyncTimer: NodeJS.Timeout | null = null;
+  private cloudSyncPending: { label: string; sentAt: number; timeout: NodeJS.Timeout } | null = null;
   private readonly ATTRIBUTION_MS = 60000;
 
   // The off-suppression window above only catches setpoints dispatched *after*
@@ -173,7 +187,7 @@ export class KumoThermostatAccessory {
   // change to its target(s). Fired from processZoneUpdate (catches wall
   // thermostat / Kumo app / any observed change) and from the setters (catches a
   // HomeKit change to this unit without waiting for the streaming/local echo).
-  private statusListeners: Array<(status: DeviceStatus) => void> = [];
+  private statusListeners: Array<(status: DeviceStatus, source: StatusSource) => void> = [];
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -824,6 +838,8 @@ export class KumoThermostatAccessory {
       },
     } as Zone;
 
+    this.noteCloudSync(data);
+
     // Use existing update processing logic
     this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
 
@@ -861,18 +877,19 @@ export class KumoThermostatAccessory {
    * MirrorController to follow a source unit. The listener receives the live
    * currentStatus; treat it as read-only.
    */
-  public onStatusUpdate(listener: (status: DeviceStatus) => void): void {
+  public onStatusUpdate(listener: (status: DeviceStatus, source: StatusSource) => void): void {
     this.statusListeners.push(listener);
   }
 
-  private notifyStatusListeners(): void {
+  /** `source` says where the state came from; a setter's own echo is 'command'. */
+  private notifyStatusListeners(source: StatusSource = 'command'): void {
     if (!this.currentStatus || this.statusListeners.length === 0) {
       return;
     }
     const snapshot = this.currentStatus;
     for (const listener of this.statusListeners) {
       try {
-        listener(snapshot);
+        listener(snapshot, source);
       } catch (err) {
         this.platform.log.error('Status listener error:', err);
       }
@@ -1037,6 +1054,9 @@ export class KumoThermostatAccessory {
   // Called by platform when new zone data is available
   public updateFromZone(zone: Zone) {
     const updateTimestamp = Date.now();
+    if (zone.adapter) {
+      this.noteCloudSync(zone.adapter);
+    }
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
 
@@ -1146,6 +1166,7 @@ export class KumoThermostatAccessory {
         // regression). Local polls (every localPollInterval) confirm the real state
         // within the window.
         this.lastLocalUpdateTs = Date.now();
+        this.scheduleCloudSync(commands);
         return { ok: true, path: 'local' };
       }
       this.platform.log.debug(
@@ -1153,6 +1174,62 @@ export class KumoThermostatAccessory {
       );
     }
     return { ok: await this.kumoAPI.sendCommand(this.deviceSerial, commands), path: 'cloud' };
+  }
+
+  /**
+   * The cloud never sees a LAN command, so the Comfort app, which shows the cloud's
+   * copy, kept the old state for minutes. Found live 2026-09-27: the kitchen was
+   * heating and the Comfort app said off. A few seconds after a LAN command, ask the
+   * adapter to report to the cloud, and log when the cloud's copy matches.
+   */
+  private scheduleCloudSync(commands: Commands): void {
+    const api = this.kumoAPI as unknown as { requestDeviceStatus?: (serial: string) => void };
+    if (typeof api.requestDeviceStatus !== 'function') {
+      return;
+    }
+    if (this.cloudSyncTimer) {
+      clearTimeout(this.cloudSyncTimer);
+    }
+    this.cloudSyncTimer = setTimeout(() => {
+      this.cloudSyncTimer = null;
+      api.requestDeviceStatus!(this.deviceSerial);
+    }, this.CLOUD_SYNC_DELAY_MS);
+    this.cloudSyncTimer.unref?.();
+
+    // Only power and mode are checked; a setpoint-only command is still synced.
+    if (commands.operationMode === undefined) {
+      return;
+    }
+    if (this.cloudSyncPending) {
+      clearTimeout(this.cloudSyncPending.timeout);
+    }
+    const label = syncLabel({ operationMode: commands.operationMode });
+    const sentAt = Date.now();
+    const timeout = setTimeout(() => {
+      if (this.cloudSyncPending?.sentAt === sentAt) {
+        this.cloudSyncPending = null;
+        this.platform.log.info(
+          `[CLOUD SYNC] ${this.accessory.displayName}: the cloud still doesn't report ${label} ` +
+          `${this.CLOUD_SYNC_WATCH_MS / 1000}s after the LAN command`,
+        );
+      }
+    }, this.CLOUD_SYNC_WATCH_MS);
+    timeout.unref?.();
+    this.cloudSyncPending = { label, sentAt, timeout };
+  }
+
+  /** Log once when a cloud update matches the power/mode of the last LAN command. */
+  private noteCloudSync(data: { power?: number; operationMode?: string }): void {
+    const pending = this.cloudSyncPending;
+    if (!pending || syncLabel(data) !== pending.label) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.cloudSyncPending = null;
+    this.platform.log.info(
+      `[CLOUD SYNC] ${this.accessory.displayName}: the cloud now reports ${pending.label}, ` +
+      `${((Date.now() - pending.sentAt) / 1000).toFixed(1)}s after the LAN command`,
+    );
   }
 
   private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
@@ -1343,7 +1420,7 @@ export class KumoThermostatAccessory {
 
       // Notify mirror listeners — this only runs on an applied update (early
       // returns above skip it), so a dropped/stale update never mirrors.
-      this.notifyStatusListeners();
+      this.notifyStatusListeners(source);
     } catch (error) {
       this.platform.log.error('Error updating device status:', error);
     }

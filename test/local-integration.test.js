@@ -79,7 +79,7 @@ function makeHarness({ localClient = null } = {}) {
     sendCommand(serial, commands) { sendCommandCalls.push({ serial, commands }); return Promise.resolve(true); },
   };
   const handler = new KumoThermostatAccessory(platform, makeAccessory(), kumoAPI, 30);
-  return { handler, sendCommandCalls, platform };
+  return { handler, sendCommandCalls, platform, kumoAPI };
 }
 
 const localStatus = (over = {}) => ({
@@ -201,4 +201,76 @@ test('commands skip local when the unit is not locally reachable', async () => {
 
   assert.strictEqual(local.calls.length, 0, 'local not attempted');
   assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }], 'cloud used');
+});
+
+// ---- where an update came from (for the mirror's startup wait) ---------------
+
+test('status listeners are told whether an update came from the LAN, the cloud or a command', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  const from = [];
+  handler.onStatusUpdate((_s, source) => from.push(source));
+
+  handler.updateFromZone(cloudZone({ operationMode: 'heat' }));
+  handler.updateFromLocal(localStatus({ operationMode: 'cool' }), Date.now());
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await sleep(20);
+
+  assert.deepStrictEqual(from, ['polling', 'local', 'command']);
+});
+
+// ---- asking the adapter to report to the cloud after a LAN command ----------
+//
+// The cloud never sees a LAN command, so the Comfort app kept showing the old
+// state for minutes (2026-09-27: kitchen heating, Comfort app said off).
+
+test('a LAN command asks the adapter to report to the cloud a moment later', async () => {
+  const local = makeLocalClient();
+  const { handler, kumoAPI } = makeHarness({ localClient: local });
+  const asked = [];
+  kumoAPI.requestDeviceStatus = (serial) => asked.push(serial);
+  handler.CLOUD_SYNC_DELAY_MS = 5;
+  handler.updateFromLocal(localStatus({ operationMode: 'off', power: 0 }));
+
+  await handler.setActive(Characteristic.Active.ACTIVE);
+  await sleep(40);
+
+  assert.strictEqual(local.calls.length, 1, 'sent over the LAN');
+  assert.deepStrictEqual(asked, [SERIAL], 'then one status request to the cloud');
+});
+
+test('a cloud command does not ask for a report (the cloud already knows)', async () => {
+  const local = makeLocalClient({ hasLocalResult: false });
+  const { handler, kumoAPI, sendCommandCalls } = makeHarness({ localClient: local });
+  const asked = [];
+  kumoAPI.requestDeviceStatus = (serial) => asked.push(serial);
+  handler.CLOUD_SYNC_DELAY_MS = 5;
+  handler.updateFromZone(cloudZone({ operationMode: 'off', power: 0 }));
+
+  await handler.setActive(Characteristic.Active.ACTIVE);
+  await sleep(40);
+
+  assert.strictEqual(sendCommandCalls.length, 1, 'sent through the cloud');
+  assert.deepStrictEqual(asked, []);
+});
+
+test('the log says when the cloud catches up with a LAN command', async () => {
+  const local = makeLocalClient();
+  const { handler, kumoAPI, platform } = makeHarness({ localClient: local });
+  kumoAPI.requestDeviceStatus = () => {};
+  handler.CLOUD_SYNC_DELAY_MS = 5;
+  const infos = [];
+  platform.log = { ...platform.log, info: (m) => infos.push(m) };
+  handler.updateFromLocal(localStatus({ operationMode: 'cool' }));
+  handler.updateFromLocal(localStatus({ operationMode: 'off', power: 0 }), Date.now() + 1);
+
+  await handler.setActive(Characteristic.Active.ACTIVE);   // restores cool
+  await sleep(20);
+  assert.strictEqual(local.calls[0].commands.operationMode, 'cool');
+  handler.updateFromZone(cloudZone({ operationMode: 'off', power: 0 }));   // not yet
+  handler.updateFromZone(cloudZone({ operationMode: 'cool', power: 1 }));  // caught up
+
+  const synced = infos.filter((m) => m.includes('[CLOUD SYNC]'));
+  assert.strictEqual(synced.length, 1, synced.join(' | '));
+  assert.match(synced[0], /the cloud now reports cool/);
 });

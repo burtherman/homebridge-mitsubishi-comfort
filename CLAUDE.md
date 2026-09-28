@@ -461,6 +461,15 @@ sweep for listed serials.
   `'local'`), preserving streaming-sourced humidity.
 - **Local-authoritative:** while a local poll arrived within 45s, cloud updates are
   dropped so the cloud's ~7–10s lag can't clobber fresher local data.
+- **A read a command overtook is dropped (2.0):** the poller stamps each read when it
+  starts (`readStartedAt`), and `updateFromLocal` drops one that started at or before the
+  unit's last command. The poll reads status, then humidity, then applies, so a command
+  queued on the unit's lock in between went out first and was undone by the older read.
+- **Cloud sync (2.0):** the cloud never sees a LAN command, so the Comfort app showed the
+  old state for minutes. `scheduleCloudSync` sends `force_adapter_request iuStatus`
+  (`kumo-api.ts:requestDeviceStatus`) 3s after each successful LAN command and logs
+  `[CLOUD SYNC]` when a cloud update matches the command's power/mode (or that it hasn't
+  after 60s).
 - Code: `src/local-api.ts`, `platform.ts:initLocalControl/gatherLocalCreds/admitLocalDevices/
   scheduleLocalCredRetry/retryLocalCreds/getHostIpv4/startLocalPolling`,
   `accessory.ts:sendDeviceCommand/updateFromLocal`, `kumo-api.ts:onAdapterPassword/getDeviceCryptoSerial`.
@@ -529,6 +538,14 @@ seed-only and never blocks startup. Holds no secrets.
   vocabulary with *different* meanings). Written verbatim on the local path
   (`local-api.ts:buildLocalCommandBody`); folded into `fanSpeed` on the cloud path
   (`kumo-api.ts:toCloudCommands`, best-effort).
+
+**Startup wait for a LAN read (2.0):** with `localControl` on, the first comparison after
+a restart ignores cloud (streaming/polling) observations of the source and waits for a
+LAN read or a HomeKit command (`MirrorStartupGate`, `platform.mirrorWaitsForLocal`). The
+cloud doesn't see LAN commands; on 2026-09-27 its stale "heat" for the kitchen nearly
+re-synced the living room on after a LAN off. Sources that don't make it onto the LAN are
+released when local startup ends (`releaseWaiting`), and everything at 3 minutes.
+Listeners get the update's source: `onStatusUpdate((status, source) => …)`.
 
 **Latency:** a HomeKit change to the source mirrors in ~1s (debounce) via the setter
 hook; a wall-thermostat / Kumo-app change mirrors when next *observed* — within one

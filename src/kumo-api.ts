@@ -979,6 +979,14 @@ export class KumoAPI {
   }
 
   /**
+   * Ask the adapter to report its indoor-unit status to the cloud. The cloud answers
+   * with a `device_update` and refreshes its copy, which is what the Comfort app shows.
+   */
+  requestDeviceStatus(serial: string): void {
+    this.socket?.emit('force_adapter_request', serial, 'iuStatus');
+  }
+
+  /**
    * Fallback credential source: the LEGACY v2 cloud login still returns every
    * adapter's local `password` + `cryptoSerial` in plain REST — the same place
    * pykumo and Home Assistant have always gotten them. The long-standing comment

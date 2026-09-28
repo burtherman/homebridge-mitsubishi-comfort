@@ -1,6 +1,6 @@
 import type { Logger } from 'homebridge';
 import { MirrorPair, MirrorState, DeviceStatus } from './settings';
-import type { KumoThermostatAccessory } from './accessory';
+import type { KumoThermostatAccessory, StatusSource } from './accessory';
 
 /**
  * Device mirroring: makes one unit (target) follow another (source).
@@ -22,6 +22,10 @@ import type { KumoThermostatAccessory } from './accessory';
  * *down* (signature differs from the one persisted at shutdown), which is a real
  * missed edge and does get mirrored. See mirror-store.ts for why.
  *
+ * With LAN control on, that first comparison waits for a LAN read (or a HomeKit
+ * command to the source) instead of using the cloud's copy, which doesn't see LAN
+ * commands and can be minutes stale. See MirrorStartupGate.
+ *
  * See docs/superpowers/specs/2026-07-22-device-mirroring-design.md.
  */
 
@@ -32,6 +36,7 @@ interface SourceWatch {
   lastSignature: string | null;
   latest: MirrorState | null;
   timer: NodeJS.Timeout | null;
+  waitLogged?: boolean;
 }
 
 /**
@@ -43,6 +48,17 @@ export interface MirrorStatePersistence {
   save(sourceSerial: string, signature: string): void;
 }
 
+/**
+ * Says whether a source's first observation should wait for a LAN read. Found live
+ * 2026-09-27: on a restart the cloud still had the kitchen heating (it had been
+ * turned off over the LAN two minutes earlier), the saved state said off, and the
+ * mirror started turning the living room on. A fresher cloud update a second later
+ * cancelled it inside the debounce, by luck.
+ */
+export interface MirrorStartupGate {
+  waitForLocal(sourceSerial: string): boolean;
+}
+
 export class MirrorController {
   private readonly watches = new Map<string, SourceWatch>();
 
@@ -52,6 +68,7 @@ export class MirrorController {
     handlers: KumoThermostatAccessory[],
     private readonly debounceMs: number = DEFAULT_DEBOUNCE_MS,
     private readonly persist: MirrorStatePersistence | null = null,
+    private readonly gate: MirrorStartupGate | null = null,
   ) {
     const bySerial = new Map(handlers.map(h => [h.getDeviceSerial(), h]));
 
@@ -75,20 +92,46 @@ export class MirrorController {
       if (!watch) {
         watch = { targets: [], lastSignature: null, latest: null, timer: null };
         this.watches.set(pair.source, watch);
-        source.onStatusUpdate(status => this.onSourceUpdate(pair.source, status));
+        source.onStatusUpdate((status, from) => this.onSourceUpdate(pair.source, status, from));
       }
       watch.targets.push(target);
       this.log.info(`[MIRROR] ${target.getDeviceSerial()} will follow ${pair.source}`);
     }
   }
 
-  private onSourceUpdate(sourceSerial: string, status: DeviceStatus): void {
+  private onSourceUpdate(sourceSerial: string, status: DeviceStatus, from?: StatusSource): void {
     const watch = this.watches.get(sourceSerial);
     if (!watch) {
       return;
     }
     const state = toMirrorState(status);
     watch.latest = state;
+
+    const fromCloud = from === 'streaming' || from === 'polling';
+    if (watch.lastSignature === null && fromCloud && this.gate?.waitForLocal(sourceSerial)) {
+      if (!watch.waitLogged) {
+        watch.waitLogged = true;
+        this.log.info(`[MIRROR] ${sourceSerial}: waiting for a LAN read before comparing with the saved state`);
+      }
+      return;
+    }
+    this.observe(sourceSerial, watch, state);
+  }
+
+  /**
+   * Run the first comparison for sources still waiting on a LAN read whose wait is
+   * over (local control finished starting up, or gave up on them), using the latest
+   * state seen. The platform calls this when local startup ends and at a deadline.
+   */
+  releaseWaiting(): void {
+    for (const [sourceSerial, watch] of this.watches) {
+      if (watch.lastSignature === null && watch.latest && !this.gate?.waitForLocal(sourceSerial)) {
+        this.observe(sourceSerial, watch, watch.latest);
+      }
+    }
+  }
+
+  private observe(sourceSerial: string, watch: SourceWatch, state: MirrorState): void {
     const sig = signature(state);
 
     // First observation after (re)start seeds the baseline without pushing — a
