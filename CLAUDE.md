@@ -465,6 +465,13 @@ sweep for listed serials.
   starts (`readStartedAt`), and `updateFromLocal` drops one that started at or before the
   unit's last command. The poll reads status, then humidity, then applies, so a command
   queued on the unit's lock in between went out first and was undone by the older read.
+- **The unit catching up (2.0):** a unit keeps reporting its old state for a moment after
+  accepting a command (a read that started 1s after the kitchen's off finished still said
+  heat; the cloud had off by 3.3s). For `COMMAND_SETTLE_MS` (15s) after a command,
+  `contradictsRecentCommand` drops a LAN read that disagrees with what was sent (mode,
+  setpoints ±0.3, fan, vane) and logs `[LOCAL] … waiting for it to catch up`. A read that
+  agrees ends the wait; after the window the unit's report wins. Trade-off: a real wall
+  change in those 15s shows at the next poll instead.
 - **Cloud sync (2.0):** the cloud never sees a LAN command, so the Comfort app showed the
   old state for minutes. `scheduleCloudSync` sends `force_adapter_request iuStatus`
   (`kumo-api.ts:requestDeviceStatus`) 3s after each successful LAN command and logs

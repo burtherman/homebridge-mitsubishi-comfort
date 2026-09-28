@@ -167,6 +167,12 @@ export class KumoThermostatAccessory {
   private readonly CLOUD_SYNC_WATCH_MS = 60000;
   private cloudSyncTimer: NodeJS.Timeout | null = null;
   private cloudSyncPending: { label: string; sentAt: number; timeout: NodeJS.Timeout } | null = null;
+  // What our recent commands set, and until when a LAN read that disagrees is taken
+  // as the unit still catching up; see contradictsRecentCommand.
+  private readonly COMMAND_SETTLE_MS = 15000;
+  private expected: {
+    label?: string; spHeat?: number; spCool?: number; fan?: string; vane?: string; until: number;
+  } | null = null;
   private readonly ATTRIBUTION_MS = 60000;
 
   // The off-suppression window above only catches setpoints dispatched *after*
@@ -1082,6 +1088,14 @@ export class KumoThermostatAccessory {
       );
       return;
     }
+    const behind = this.contradictsRecentCommand(status);
+    if (behind) {
+      this.platform.log.info(
+        `[LOCAL] ${this.accessory.displayName}: the unit still reports ${behind} just after our command; ` +
+        'waiting for it to catch up',
+      );
+      return;
+    }
     const updateTimestamp = Date.now();
     const zoneUpdate: Partial<Zone> = {
       id: this.currentStatus?.id || '',
@@ -1144,6 +1158,9 @@ export class KumoThermostatAccessory {
     }
 
     const { ok, path } = await this.dispatchCommand(commands);
+    if (ok) {
+      this.expectFromCommand(commands);
+    }
     this.platform.log.info(
       `[CMD] ${this.accessory.displayName} <- ${origin} via ${path}` +
       `${ok ? '' : ' FAILED'}: ${JSON.stringify(commands)}`,
@@ -1174,6 +1191,73 @@ export class KumoThermostatAccessory {
       );
     }
     return { ok: await this.kumoAPI.sendCommand(this.deviceSerial, commands), path: 'cloud' };
+  }
+
+  /** Record what a successful command set; see contradictsRecentCommand. */
+  private expectFromCommand(commands: Commands): void {
+    const now = Date.now();
+    const next = { ...(this.expected && this.expected.until > now ? this.expected : {}), until: now + this.COMMAND_SETTLE_MS };
+    if (commands.operationMode !== undefined) {
+      next.label = syncLabel({ operationMode: commands.operationMode });
+    }
+    if (commands.spHeat !== undefined) {
+      next.spHeat = commands.spHeat;
+    }
+    if (commands.spCool !== undefined) {
+      next.spCool = commands.spCool;
+    }
+    const fan = commands.fanSpeedRaw ?? commands.fanSpeed;
+    if (fan !== undefined) {
+      next.fan = fan;
+    }
+    if (commands.vaneDir !== undefined) {
+      next.vane = commands.vaneDir;
+    }
+    this.expected = next;
+  }
+
+  /**
+   * A unit keeps reporting its old state for a moment after accepting a command.
+   * Found live 2026-09-27: a LAN read that started a second after the kitchen's off
+   * had finished still said heat; the tile flipped back and the mirror pushed heat
+   * to the living room. The cloud had "off" 3.3s after the command. Within
+   * COMMAND_SETTLE_MS of a command, a read that disagrees with it is ignored; after
+   * that the unit's report wins, so a command it really rejected still shows. A read
+   * that agrees ends the wait, so a real change right after is applied. Returns what
+   * disagrees, or null.
+   */
+  private contradictsRecentCommand(status: Partial<DeviceStatus>): string | null {
+    const e = this.expected;
+    if (!e) {
+      return null;
+    }
+    if (Date.now() >= e.until) {
+      this.expected = null;
+      return null;
+    }
+    const diffs: string[] = [];
+    const reported = syncLabel(status);
+    if (e.label !== undefined && reported !== e.label) {
+      diffs.push(`${reported} (we sent ${e.label})`);
+    }
+    const near = (v: number | undefined, want: number) => typeof v !== 'number' || Math.abs(v - want) < 0.3;
+    if (e.spHeat !== undefined && !near(status.spHeat, e.spHeat)) {
+      diffs.push(`heat setpoint ${status.spHeat} (we sent ${e.spHeat})`);
+    }
+    if (e.spCool !== undefined && !near(status.spCool, e.spCool)) {
+      diffs.push(`cool setpoint ${status.spCool} (we sent ${e.spCool})`);
+    }
+    if (e.fan !== undefined && status.fanSpeed && status.fanSpeed !== e.fan) {
+      diffs.push(`fan ${status.fanSpeed} (we sent ${e.fan})`);
+    }
+    if (e.vane !== undefined && status.airDirection && status.airDirection !== e.vane) {
+      diffs.push(`vane ${status.airDirection} (we sent ${e.vane})`);
+    }
+    if (diffs.length === 0) {
+      this.expected = null;
+      return null;
+    }
+    return diffs.join(', ');
   }
 
   /**

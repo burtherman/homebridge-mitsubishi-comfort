@@ -123,8 +123,10 @@ test('a REAL local change after an OFF still fires the mirror hook (following pr
   await handler.setActive(Characteristic.Active.INACTIVE);
 
   // A genuine local poll (e.g. someone used the wall thermostat) reads cool — the
-  // mirror MUST still follow this (the fix only blocks stale *cloud* data, never
-  // authoritative local reads).
+  // mirror MUST still follow this. Since 2026-09-27 a LAN read that disagrees with a
+  // command in its first seconds is taken as the unit catching up (it reports its old
+  // state for a moment), so the real change is the one after the unit confirmed off.
+  handler.updateFromLocal(localStatus({ operationMode: 'off', power: 0 }));
   handler.updateFromLocal(localStatus({ operationMode: 'cool', power: 1, spCool: 23 }));
 
   assert.ok(

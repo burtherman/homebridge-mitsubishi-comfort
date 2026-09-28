@@ -137,18 +137,67 @@ test('a local read that started before our command is dropped when it lands afte
   assert.ok(!seen.slice(seen.indexOf('off')).includes('heat'), 'the mirror never sees the stale heat');
 });
 
-test('a local read that started after our command still applies', async () => {
+test('a local read that started after our command applies once the unit has settled', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  handler.COMMAND_SETTLE_MS = 10;
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }));
+
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await sleep(20);
+  // Someone turned it back on at the wall; this read started after the off.
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }), Date.now());
+
+  assert.strictEqual(await handler.getActive(), Characteristic.Active.ACTIVE);
+});
+
+// ---- the unit catching up with a command (2026-09-27) -----------------------
+//
+// A read that started a second AFTER the kitchen's off had finished still said heat:
+// the unit reports its old state for a moment after accepting a command. The tile
+// flipped back and the mirror pushed heat to the living room. The cloud had "off"
+// 3.3s after the command.
+
+test('a LAN read that still shows the old mode just after our command is ignored', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }));
+  const seen = [];
+  handler.onStatusUpdate((s) => seen.push(s.operationMode));
+
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await sleep(20);
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }), Date.now());
+
+  assert.strictEqual(await handler.getActive(), Characteristic.Active.INACTIVE, 'tile stays off');
+  assert.ok(!seen.slice(seen.indexOf('off')).includes('heat'), 'the mirror never sees the stale heat');
+});
+
+test('a read that agrees with the command ends the wait, so a real change after it applies', async () => {
   const local = makeLocalClient();
   const { handler } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat' }));
 
   await handler.setActive(Characteristic.Active.INACTIVE);
   await sleep(20);
-  await sleep(2);
-  // Someone turned it back on at the wall; this read started after the off.
-  handler.updateFromLocal(localStatus({ operationMode: 'heat' }), Date.now());
+  handler.updateFromLocal(localStatus({ operationMode: 'off', power: 0 }), Date.now());
+  handler.updateFromLocal(localStatus({ operationMode: 'cool' }), Date.now());   // the wall, right after
 
   assert.strictEqual(await handler.getActive(), Characteristic.Active.ACTIVE);
+});
+
+test('a setpoint read that has not caught up is ignored, and a matching one applies', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
+
+  await handler.setHeatingThresholdTemperature(22.3);
+  await sleep(2);   // a read stamped in the command's own millisecond counts as before it
+  handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }), Date.now());
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22.3, 'the old 20 is ignored');
+
+  handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 22.3, roomTemp: 25 }), Date.now());
+  assert.strictEqual(await handler.getCurrentTemperature(), 25, 'the caught-up read applies');
 });
 
 // ---- local authoritative --------------------------------------------------
