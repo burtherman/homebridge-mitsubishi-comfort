@@ -204,8 +204,8 @@ all units off) — rebuild it right after upgrading and verify from the log.
   (`004a583`) didn't change it. The fork found the same with its humidity sensor
   (fork commit 6caceef).
 - `moveTileServiceFirst` (`a7f6aa2`) lists the HeaterCooler first, the way 1.x's Thermostat
-  was. It's untested on the phone: the owner moved to separate tiles first. Instance IDs
-  are keyed by type + subtype, so the reorder is harmless (`test/tile-order.test.js`).
+  was. That didn't change the combined tile either (owner checked after the deploy). So
+  it's neither primary, links nor order; what iOS keys the combined tile on is unknown.
 - **No fan Auto control** appeared, though `TargetFanState` is published on every unit. The
   fork's research says the Home app shows it as Manual | Auto. The Home app sent
   `TargetFanState` AUTO with two mode changes (21:38:24 and 21:38:30), so a mode change
