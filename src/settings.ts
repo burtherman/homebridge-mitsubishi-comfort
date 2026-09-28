@@ -48,6 +48,12 @@ export interface KumoConfig {
   // characteristic). Default true. The Home app can favor a sensor reading on a
   // combined tile; set false to drop it, or use Home's "Show as Separate Tiles".
   showHumiditySensor?: boolean;
+  // Discrete vane positions as a HomeKit Slats service, on units whose profile
+  // reports `hasVaneDir`. Default FALSE: Apple Home files Slats under window
+  // coverings, so on a home with real blinds a room-level "close the blinds" can
+  // reach the heat pump's louver (observed by the fork's author). Swing on/off is on
+  // the unit's tile regardless (on units with `hasVaneSwing`).
+  exposeVaneSlat?: boolean;
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */
@@ -67,6 +73,9 @@ export interface MirrorState {
   spHeat: number;
   spCool: number;
   fanSpeed: string;
+  // Vane/louver position (cloud `airDirection`, local `vaneDir`). Since 2.0; only
+  // sent to a target whose profile reports vanes.
+  airDirection?: string;
 }
 
 export interface LoginResponse {

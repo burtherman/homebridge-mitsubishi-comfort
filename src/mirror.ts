@@ -154,6 +154,7 @@ export function toMirrorState(s: DeviceStatus): MirrorState {
     spHeat: s.spHeat,
     spCool: s.spCool,
     fanSpeed: s.fanSpeed,
+    airDirection: s.airDirection,
   };
 }
 
@@ -168,19 +169,22 @@ export function signature(s: MirrorState): string {
   }
   const mode = s.operationMode.startsWith('auto') ? 'auto' : s.operationMode;
   const r = (n: number) => (typeof n === 'number' && !isNaN(n) ? Math.round(n * 10) / 10 : 'x');
-  const fan = s.fanSpeed || '';
+  // Fan and vane together. The vane was added in 2.0, which changed this string's
+  // format; mirror-store.ts versions the saved signatures so the first restart after
+  // upgrading doesn't read the new format as "the source changed while we were down".
+  const air = `${s.fanSpeed || ''}|v:${s.airDirection || ''}`;
   switch (mode) {
     case 'heat':
-      return `heat|${r(s.spHeat)}|${fan}`;
+      return `heat|${r(s.spHeat)}|${air}`;
     case 'cool':
-      return `cool|${r(s.spCool)}|${fan}`;
+      return `cool|${r(s.spCool)}|${air}`;
     case 'auto':
-      return `auto|${r(s.spHeat)}|${r(s.spCool)}|${fan}`;
+      return `auto|${r(s.spHeat)}|${r(s.spCool)}|${air}`;
     case 'dry':
-      return `dry|${r(s.spCool)}|${fan}`;
+      return `dry|${r(s.spCool)}|${air}`;
     case 'vent':
-      return `vent|${fan}`;
+      return `vent|${air}`;
     default:
-      return `${mode}|${r(s.spHeat)}|${r(s.spCool)}|${fan}`;
+      return `${mode}|${r(s.spHeat)}|${r(s.spCool)}|${air}`;
   }
 }

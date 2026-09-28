@@ -26,6 +26,15 @@ import type { Logger } from 'homebridge';
  * hold no secrets — mode, setpoints and fan speed only.
  */
 
+/**
+ * Bumped whenever mirror.ts's signature format changes. A stored signature in another
+ * format would never match a fresh one, so the first observation after an upgrade
+ * would read as "the source changed while we were down" and push every source onto
+ * its targets. 2 = 2.0 (vane added). Other versions are discarded on load, which
+ * degrades that one restart to the old seed-only behavior.
+ */
+export const MIRROR_STORE_VERSION = 2;
+
 export function loadMirrorStore(file: string, log: Logger): Map<string, string> {
   const out = new Map<string, string>();
   try {
@@ -33,6 +42,13 @@ export function loadMirrorStore(file: string, log: Logger): Map<string, string> 
       return out;
     }
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (data?.version !== MIRROR_STORE_VERSION) {
+      log.info(
+        `Mirror state store is version ${data?.version ?? 'unknown'}, expected ${MIRROR_STORE_VERSION} — ` +
+        'discarding it (this restart seeds each source without pushing)',
+      );
+      return out;
+    }
     for (const [serial, v] of Object.entries((data?.sources ?? {}) as Record<string, unknown>)) {
       if (typeof v === 'string') {
         out.set(serial, v);
@@ -54,7 +70,7 @@ export function saveMirrorStore(file: string, sigs: Map<string, string>, log: Lo
     }
     // Write-then-rename so a crash mid-write can't leave a truncated store.
     const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, sources }, null, 2) + '\n');
+    fs.writeFileSync(tmp, JSON.stringify({ version: MIRROR_STORE_VERSION, sources }, null, 2) + '\n');
     fs.renameSync(tmp, file);
   } catch (e) {
     log.warn(`Mirror state store write failed: ${e instanceof Error ? e.message : String(e)}`);

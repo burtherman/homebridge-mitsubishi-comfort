@@ -26,7 +26,7 @@ function makeHandler(serial) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const st = (over = {}) => ({ operationMode: 'heat', power: 1, spHeat: 21, spCool: 24, fanSpeed: 'auto', ...over });
+const st = (over = {}) => ({ operationMode: 'heat', power: 1, spHeat: 21, spCool: 24, fanSpeed: 'auto', airDirection: 'auto', ...over });
 
 // ---- signature (pure) -----------------------------------------------------
 
@@ -105,7 +105,7 @@ test('full re-sync: a temp-only source change pushes the full mode+setpoint stat
   src._fire(st({ operationMode: 'heat', spHeat: 22 }));   // temp-only change
   await sleep(45);
   assert.deepStrictEqual(tgt.applyCalls[0], {
-    operationMode: 'heat', power: 1, spHeat: 22, spCool: 24, fanSpeed: 'auto',
+    operationMode: 'heat', power: 1, spHeat: 22, spCool: 24, fanSpeed: 'auto', airDirection: 'auto',
   });
 });
 
@@ -139,6 +139,14 @@ test('toMirrorState projects a full DeviceStatus down to the mirrored fields', (
     spCool: 23, spHeat: 20, spAuto: null, modelNumber: 'X', connected: true,
   };
   assert.deepStrictEqual(toMirrorState(full), {
-    operationMode: 'cool', power: 1, spHeat: 20, spCool: 23, fanSpeed: 'quiet',
+    operationMode: 'cool', power: 1, spHeat: 20, spCool: 23, fanSpeed: 'quiet', airDirection: 'auto',
   });
+});
+
+test('a vane change is a source change (2.0); off still ignores it', () => {
+  assert.notStrictEqual(signature(st({ airDirection: 'auto' })), signature(st({ airDirection: 'swing' })));
+  assert.strictEqual(
+    signature(st({ operationMode: 'off', power: 0, airDirection: 'auto' })),
+    signature(st({ operationMode: 'off', power: 0, airDirection: 'swing' })),
+  );
 });

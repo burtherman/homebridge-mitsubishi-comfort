@@ -172,3 +172,36 @@ test('save leaves no stray temp file behind', () => {
   assert.deepStrictEqual(fs.readdirSync(dir), ['state.json']);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ---- 2.0 upgrade: the signature format changed --------------------------------
+
+test('a 1.x (version 1) store is discarded, so the first 2.0 restart does not push', async () => {
+  // 1.x saved signatures without the vane ("heat|21|auto"). 2.0 adds it
+  // ("heat|21|auto|v:auto"), so the stored value can never match a fresh one. Loaded
+  // as-is, the first observation after upgrading would read as "the source changed
+  // while we were down" and push the kitchen onto the living room.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-store-'));
+  const file = path.join(dir, 'mirror.json');
+  fs.writeFileSync(file, JSON.stringify({ version: 1, sources: { SRC: 'heat|21|auto' } }));
+
+  const loaded = loadMirrorStore(file, makeLog());
+  assert.strictEqual(loaded.size, 0, 'the old-format store is discarded');
+
+  const persist = makePersist(Object.fromEntries(loaded));
+  const src = makeHandler('SRC'); const tgt = makeHandler('TGT');
+  new MirrorController(makeLog(), [{ source: 'SRC', target: 'TGT' }], [src, tgt], 15, persist);
+  src._fire(st({ spHeat: 21, airDirection: 'auto' }));
+  await sleep(45);
+  assert.strictEqual(tgt.applyCalls.length, 0, 'seeded, not pushed');
+
+  // The counterfactual this guards: the old string really would have looked changed.
+  assert.notStrictEqual('heat|21|auto', signature(st({ spHeat: 21, airDirection: 'auto' })));
+});
+
+test('the store is saved as the current version and reloads', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-store-'));
+  const file = path.join(dir, 'mirror.json');
+  saveMirrorStore(file, new Map([['SRC', 'heat|21|auto|v:auto']]), makeLog());
+  assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).version, 2);
+  assert.strictEqual(loadMirrorStore(file, makeLog()).get('SRC'), 'heat|21|auto|v:auto');
+});

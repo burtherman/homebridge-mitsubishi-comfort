@@ -166,8 +166,8 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 
 Each unit is a `HeaterCooler` (was `Thermostat` through 1.x). Ported from the fork
 `homebridge-mitsubishi-heatpump` (ukaratay, Apache-2.0) with attribution — see NOTICE and
-`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stages 6–7 still to do:
-vane, schema/docs/release).
+`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stage 7 still to do:
+schema, release).
 
 | HomeKit Characteristic | Kumo API Field | Notes |
 |----------------------|----------------|-------|
@@ -180,6 +180,8 @@ vane, schema/docs/release).
 | Fanv2 (subtype `airflow`).RotationSpeed | fanSpeed | 5 detents 0/25/50/75/100 = superQuiet/quiet/low/powerful/superPowerful. Never 'auto' |
 | Fanv2.TargetFanState | fanSpeed === 'auto' | AUTO/MANUAL; registered only if the profile has `hasFanSpeedAuto`. MANUAL restores `lastManualFan` |
 | Fanv2.Active / CurrentFanState | power/mode/standby | Follows the unit. **Fan-tile OFF is refused** (a room-wide "turn off the fan" must not stop the heat pump); ON = setActive(1) |
+| HeaterCooler.SwingMode | airDirection === 'swing' | Registered only if `hasVaneSwing`. OFF restores `lastFixedVane` ('auto' if none seen) |
+| Slats.TargetTiltAngle / CurrentTiltAngle / CurrentSlatState | airDirection | Opt-in `exposeVaneSlat` + `hasVaneDir`. -90/-45/0/45/90 = horizontal/midhorizontal/midpoint/midvertical/vertical; nearest wins |
 | HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler |
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
@@ -240,6 +242,24 @@ all units off) — rebuild it right after upgrading and verify from the log.
   The fork found it advisory on its units; the Pi checklist verifies each speed on each unit.
 - Origin label `homekit:fan`; every successful fan write notifies the mirror (fan speed is in
   its signature).
+
+### Vanes (2.0 stage 6)
+
+- SwingMode on the HeaterCooler (not the fan: the Home app doesn't show a linked fan's
+  oscillate toggle on a combined tile — the fork's research). Slats service opt-in via
+  `exposeVaneSlat` (Apple Home files Slats under window coverings). Ported from the fork.
+- Vane writes share the power/mode/fan queue with the same rules as fan speed (dropped
+  with an off, ride along with a power-on, not sent alone to an off unit —
+  `flushAirflowOnly`). Origin `homekit:vane`.
+- Owner's units have fixed vanes (`hasVaneDir`/`hasVaneSwing` false), so none of this
+  appears on them. Coverage is unit tests + a volunteer with movable vanes (issue #6).
+- **Mirror:** `MirrorState.airDirection` and the signature (`…|fan|v:<vane>`) include the
+  vane; `applyMirror` sends `vaneDir` only to a target whose profile has the capability
+  (`mirrorVane`: swing needs hasVaneSwing, other positions hasVaneDir, nothing before the
+  profile arrives). Changing the signature format is why `mirror-store.ts` is now
+  **version 2** and discards other versions on load: an old-format signature can never match,
+  so the first restart after upgrading would otherwise read as "source changed while down"
+  and push the kitchen onto the living room. That one restart degrades to seed-only.
 
 ### Setpoint writes are held briefly (since 1.8.2)
 
@@ -505,8 +525,8 @@ One source may drive several targets (multiple entries). Unknown / self-referent
 entries are warned and skipped at startup. Like `localControl`, `mirror` is read from
 the *parent* Homebridge config, so toggling it needs a **full Homebridge restart**.
 
-**Out of scope:** vane/louver direction, bidirectional sync, mirroring room temp /
-humidity (sensor readings, not settings).
+**Out of scope:** bidirectional sync, mirroring room temp / humidity (sensor readings,
+not settings). Vane direction is mirrored since 2.0 (capable targets only).
 
 Code: `src/mirror.ts`, `accessory.ts:onStatusUpdate/applyMirror/clampSetpoint/normalizeMirrorMode`,
 `platform.ts` (controller construction/teardown), `settings.ts` (`MirrorPair`/`MirrorState`/`Commands.fanSpeedRaw`),

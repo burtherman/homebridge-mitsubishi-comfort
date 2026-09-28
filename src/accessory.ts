@@ -3,7 +3,7 @@ import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
 import {
   POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
-  FanSpeed, FAN_SPEEDS, normalizeFanSpeed,
+  FanSpeed, FAN_SPEEDS, normalizeFanSpeed, VaneDirection, isVaneDirection,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 
@@ -22,13 +22,21 @@ export type CommandOrigin =
   | 'homekit:fan-switch'
   | 'homekit:dry-switch'
   | 'homekit:fan'
+  | 'homekit:vane'
   | 'mirror';
 
 type ActiveMode = 'heat' | 'cool' | 'auto' | 'dry' | 'vent';
 type SetpointField = 'spHeat' | 'spCool';
 
 /** One burst of HomeKit writes for power, mode and fan, resolved into one command. */
-type Intent = { active?: boolean; mode?: 'heat' | 'cool' | 'auto'; fanAuto?: boolean; fanSpeed?: FanSpeed };
+type Intent = {
+  active?: boolean;
+  mode?: 'heat' | 'cool' | 'auto';
+  fanAuto?: boolean;
+  fanSpeed?: FanSpeed;
+  swing?: boolean;
+  vane?: VaneDirection;
+};
 
 /**
  * Fan slider step: five real speeds at 0/25/50/75/100, one position each. 0 is the
@@ -39,6 +47,21 @@ type Intent = { active?: boolean; mode?: 'heat' | 'cool' | 'auto'; fanAuto?: boo
  * (Ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
  */
 const FAN_PCT_STEP = 25;
+
+/**
+ * Fixed vane positions as Slats tilt angles, in physical order ('horizontal' is the
+ * flattest blade, 'vertical' the most downward). 'auto' and 'swing' aren't fixed angles;
+ * they're expressed through SwingMode and CurrentSlatState.
+ * (Ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
+ */
+const VANE_TILT: ReadonlyArray<{ vane: VaneDirection; angle: number }> = [
+  { vane: 'horizontal', angle: -90 },
+  { vane: 'midhorizontal', angle: -45 },
+  { vane: 'midpoint', angle: 0 },
+  { vane: 'midvertical', angle: 45 },
+  { vane: 'vertical', angle: 90 },
+];
+const TILT_STEP = 45;
 
 /**
  * Collapse power + operationMode into the one label that matters for "is it on,
@@ -86,6 +109,12 @@ export class KumoThermostatAccessory {
   // TargetFanState MANUAL has to pick a speed, and in auto the slider still needs a
   // position: the last real speed the unit was seen at.
   private lastManualFan: FanSpeed = 'quiet';
+  // Vane: SwingMode on the HeaterCooler (units with hasVaneSwing) and an opt-in Slats
+  // service (hasVaneDir + exposeVaneSlat). The unit stores one vane field, so turning
+  // swing off restores the last fixed position it was seen in.
+  private slatsService: Service | null = null;
+  private swingModeRegistered = false;
+  private lastFixedVane: VaneDirection = 'auto';
   private modelNumberSet: boolean = false;
 
   // Power, mode and fan writes arriving in one HomeKit request, combined into one command.
@@ -248,6 +277,16 @@ export class KumoThermostatAccessory {
         .onSet(this.setDryOn.bind(this));
     }
 
+    // A cached Slats (vane) service needs its handlers now too; applyDeviceProfile
+    // removes it if the unit has no vanes or exposeVaneSlat is off.
+    if (this.accessory.getService(this.platform.Service.Slats)) {
+      if (this.platform.kumoConfig?.exposeVaneSlat === true) {
+        this.setupSlatsService();
+      } else {
+        this.accessory.removeService(this.accessory.getService(this.platform.Service.Slats)!);
+      }
+    }
+
     // A cached HumiditySensor needs its handler now, not when the first humidity
     // reading arrives, or HomeKit reads a default until then.
     const cachedHumidity = this.accessory.getService(this.platform.Service.HumiditySensor);
@@ -312,6 +351,25 @@ export class KumoThermostatAccessory {
       this.targetFanStateRegistered = true;
       this.syncFanCharacteristics(this.currentStatus?.fanSpeed);
       this.publishStructureChange();
+    }
+
+    // Swing on the unit's own tile, on units that have it. On the HeaterCooler, not
+    // the fan: the Home app doesn't show a linked fan's oscillate toggle on a combined
+    // tile (the fork's research), so swing on the fan would be unreachable by default.
+    if (profile.hasVaneSwing && !this.swingModeRegistered) {
+      this.service.getCharacteristic(this.platform.Characteristic.SwingMode)
+        .onGet(this.getSwingMode.bind(this))
+        .onSet(this.setSwingMode.bind(this));
+      this.swingModeRegistered = true;
+      this.syncVaneCharacteristics(this.currentStatus?.airDirection);
+      this.publishStructureChange();
+    }
+
+    // Fixed vane positions: opt-in, since Apple Home files Slats under window coverings.
+    if (profile.hasVaneDir && this.platform.kumoConfig?.exposeVaneSlat === true) {
+      this.setupSlatsService();
+    } else {
+      this.removeSlatsService();
     }
 
     // Dry and fan-only have no HeaterCooler mode, so each stays a Switch on units
@@ -889,6 +947,14 @@ export class KumoThermostatAccessory {
         this.fanService.updateCharacteristic(characteristic, err as never);
       }
     }
+    if (this.swingModeRegistered) {
+      this.service.updateCharacteristic(C.SwingMode, err as never);
+    }
+    if (this.slatsService) {
+      for (const characteristic of [C.CurrentSlatState, C.CurrentTiltAngle, C.TargetTiltAngle]) {
+        this.slatsService.updateCharacteristic(characteristic, err as never);
+      }
+    }
     this.fanOnlyService?.updateCharacteristic(C.On, err as never);
     this.dryService?.updateCharacteristic(C.On, err as never);
   }
@@ -905,6 +971,7 @@ export class KumoThermostatAccessory {
     }
     this.refreshThresholds(this.currentStatus);
     this.syncFanCharacteristics(this.currentStatus.fanSpeed);
+    this.syncVaneCharacteristics(this.currentStatus.airDirection);
     if (this.humidityService && typeof this.currentStatus.humidity === 'number') {
       this.humidityService.updateCharacteristic(C.CurrentRelativeHumidity, this.currentStatus.humidity);
     }
@@ -1180,6 +1247,7 @@ export class KumoThermostatAccessory {
       // mode (heat shows spHeat, cool shows spCool, auto shows the band).
       this.refreshThresholds(status);
       this.syncFanCharacteristics(status.fanSpeed);
+      this.syncVaneCharacteristics(status.airDirection);
 
       // Only update humidity if the device has a humidity sensor
       if (this.hasHumiditySensor && status.humidity !== null && status.humidity !== undefined) {
@@ -1525,6 +1593,17 @@ export class KumoThermostatAccessory {
     return intent.fanAuto === false ? this.lastManualFan : undefined;
   }
 
+  /** The vane a burst asks for: swing on wins, then a tilt position, then (swing off) the last fixed one. */
+  private resolveVane(intent: Intent): VaneDirection | undefined {
+    if (intent.swing === true) {
+      return 'swing';
+    }
+    if (intent.vane) {
+      return intent.vane;
+    }
+    return intent.swing === false ? this.lastFixedVane : undefined;
+  }
+
   /**
    * Resolve one burst into a single command:
    *  - Active=0 wins: off, whatever mode or fan speed came with it (an "AC off"
@@ -1540,6 +1619,7 @@ export class KumoThermostatAccessory {
   private async flushIntent(intent: Intent): Promise<void> {
     const name = this.accessory.displayName;
     const fan = this.resolveFan(intent);
+    const vane = this.resolveVane(intent);
     let operationMode: 'off' | ActiveMode;
     if (intent.active === false) {
       operationMode = 'off';
@@ -1550,11 +1630,12 @@ export class KumoThermostatAccessory {
         this.platform.log.debug(`[MODE CHANGE] ${name}: an off is in flight — not sending ${intent.mode}`);
         setTimeout(() => this.refreshClimateCharacteristics(), 100);
         this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+        this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
         return;
       }
       operationMode = intent.mode;
-    } else if (fan) {
-      return this.flushFanOnly(fan);
+    } else if (fan || vane) {
+      return this.flushAirflowOnly(fan, vane);
     } else {
       return;
     }
@@ -1574,6 +1655,9 @@ export class KumoThermostatAccessory {
     if (operationMode !== 'off' && fan) {
       commands.fanSpeed = fan;
     }
+    if (operationMode !== 'off' && vane) {
+      commands.vaneDir = vane;
+    }
 
     const origin: CommandOrigin = intent.active !== undefined ? 'homekit:active' : 'homekit:mode';
     const label = origin === 'homekit:active' ? 'ACTIVE' : 'MODE CHANGE';
@@ -1583,6 +1667,7 @@ export class KumoThermostatAccessory {
       setTimeout(() => {
         this.refreshClimateCharacteristics();
         this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+        this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
       }, 100);
       return;
     }
@@ -1599,10 +1684,14 @@ export class KumoThermostatAccessory {
       if (commands.fanSpeed !== undefined) {
         this.currentStatus.fanSpeed = commands.fanSpeed;
       }
+      if (commands.vaneDir !== undefined) {
+        this.currentStatus.airDirection = commands.vaneDir;
+      }
       this.rememberActiveMode(this.currentStatus);
       this.refreshClimateCharacteristics();
       this.refreshThresholds(this.currentStatus);
       this.syncFanCharacteristics(this.currentStatus.fanSpeed);
+      this.syncVaneCharacteristics(this.currentStatus.airDirection);
     }
     // Heat/cool/auto/off leave the Dry and Fan Only switches off; a power-on that
     // restored dry or fan-only turns its switch on.
@@ -1612,32 +1701,51 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * A fan change with no power or mode change in the same burst.
+   * A fan and/or vane change with no power or mode change in the same burst, sent
+   * as one command.
    *
    * Not sent to a unit that is off, or one being turned off. The fork this came from
-   * sends it anyway (it saw a fan-only write leave its own off units off), but our
-   * 1.7.2 notes record a bare, mode-less local write reviving an off unit, and a fan
-   * write has no mode either. Until that's verified on real hardware, an off unit's
-   * fan change is shown in HomeKit and dropped; the next status update restores the
-   * slider. A fan change in the same burst as a power-on is sent with it.
+   * sends it anyway (it saw fan and vane writes leave its own off units off), but our
+   * 1.7.2 notes record a bare, mode-less local write reviving an off unit, and these
+   * writes have no mode either. Until that's verified on real hardware, an off
+   * unit's fan or vane change is dropped and the next status update restores the
+   * tile. A change in the same burst as a power-on is sent with it.
    */
-  private async flushFanOnly(fan: FanSpeed): Promise<void> {
+  private async flushAirflowOnly(fan: FanSpeed | undefined, vane: VaneDirection | undefined): Promise<void> {
     const name = this.accessory.displayName;
     const off = !this.currentStatus || this.currentStatus.power === 0 || this.currentStatus.operationMode === 'off';
     if (this.offInFlight() || off) {
-      this.platform.log.debug(`[FAN] ${name}: unit is off / turning off — not sending fan "${fan}"`);
+      this.platform.log.debug(
+        `[AIRFLOW] ${name}: unit is off / turning off — not sending ${JSON.stringify({ fan, vane })}`);
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+      this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
       return;
     }
-    const success = await this.sendDeviceCommand({ fanSpeed: fan }, 'homekit:fan');
+    const commands: Commands = {};
+    if (fan) {
+      commands.fanSpeed = fan;
+    }
+    if (vane) {
+      commands.vaneDir = vane;
+    }
+    const origin: CommandOrigin = fan ? 'homekit:fan' : 'homekit:vane';
+    const success = await this.sendDeviceCommand(commands, origin);
     if (!success) {
-      this.platform.log.error(`[FAN] ${name}: failed to set "${fan}"`);
+      this.platform.log.error(`[AIRFLOW] ${name}: failed to set ${JSON.stringify(commands)}`);
       this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? 'auto');
+      this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
       return;
     }
     if (this.currentStatus) {
-      this.currentStatus.fanSpeed = fan;
+      if (fan) {
+        this.currentStatus.fanSpeed = fan;
+      }
+      if (vane) {
+        this.currentStatus.airDirection = vane;
+      }
     }
-    this.syncFanCharacteristics(fan);
+    this.syncFanCharacteristics(this.currentStatus?.fanSpeed ?? fan);
+    this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? vane);
     this.notifyStatusListeners();
   }
 
@@ -1800,6 +1908,116 @@ export class KumoThermostatAccessory {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
       this.fanService.updateCharacteristic(C.CurrentFanState, this.mapToCurrentFanState(this.currentStatus));
     }
+  }
+
+  // ---- Vane: swing and fixed positions ------------------------------------
+  // The unit holds ONE vane field for both the fixed blade angles and the two
+  // non-angle states ('auto', 'swing'). HomeKit splits it across SwingMode (a toggle
+  // on the HeaterCooler) and an optional Slats service with a tilt angle, so both are
+  // synced from one place. Every value is validated (settings.ts): the adapter
+  // accepts and silently ignores anything it doesn't know. Writes share the
+  // power/mode/fan queue. (Ported from homebridge-mitsubishi-heatpump @ 83dfd18,
+  // modified the same way as fan speed.)
+
+  private vaneToTilt(vane: string | undefined): number | null {
+    return VANE_TILT.find((v) => v.vane === vane)?.angle ?? null;
+  }
+
+  private tiltToVane(angle: number): VaneDirection {
+    let best = VANE_TILT[0];
+    for (const v of VANE_TILT) {
+      if (Math.abs(v.angle - angle) < Math.abs(best.angle - angle)) {
+        best = v;
+      }
+    }
+    return best.vane;
+  }
+
+  /** Push every vane characteristic from one device value. */
+  private syncVaneCharacteristics(vane: string | undefined): void {
+    const C = this.platform.Characteristic;
+    const swinging = vane === 'swing';
+    if (!swinging && isVaneDirection(vane) && vane !== 'auto') {
+      this.lastFixedVane = vane;
+    }
+    if (this.swingModeRegistered) {
+      this.service.updateCharacteristic(
+        C.SwingMode, swinging ? C.SwingMode.SWING_ENABLED : C.SwingMode.SWING_DISABLED);
+    }
+    if (this.slatsService) {
+      this.slatsService.updateCharacteristic(
+        C.CurrentSlatState, swinging ? C.CurrentSlatState.SWINGING : C.CurrentSlatState.FIXED);
+      const tilt = this.vaneToTilt(vane);
+      if (tilt !== null) {
+        this.slatsService.updateCharacteristic(C.CurrentTiltAngle, tilt);
+        this.slatsService.updateCharacteristic(C.TargetTiltAngle, tilt);
+      }
+    }
+  }
+
+  async getSwingMode(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    const C = this.platform.Characteristic.SwingMode;
+    return this.currentStatus?.airDirection === 'swing' ? C.SWING_ENABLED : C.SWING_DISABLED;
+  }
+
+  async setSwingMode(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const on = value === this.platform.Characteristic.SwingMode.SWING_ENABLED;
+    this.platform.log.info(`[VANE] ${this.accessory.displayName}: HomeKit sent swing ${on ? 'ON' : 'OFF'}`);
+    return this.queueIntent({ swing: on });
+  }
+
+  async getCurrentSlatState(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    const C = this.platform.Characteristic.CurrentSlatState;
+    return this.currentStatus?.airDirection === 'swing' ? C.SWINGING : C.FIXED;
+  }
+
+  async getTargetTiltAngle(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.vaneToTilt(this.currentStatus?.airDirection) ?? this.vaneToTilt(this.lastFixedVane) ?? 0;
+  }
+
+  async setTargetTiltAngle(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const vane = this.tiltToVane(value as number);
+    this.platform.log.info(`[VANE] ${this.accessory.displayName}: HomeKit sent tilt ${value}° -> "${vane}"`);
+    return this.queueIntent({ vane });
+  }
+
+  private setupSlatsService(): void {
+    if (this.slatsService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const existing = this.accessory.getService(this.platform.Service.Slats);
+    const name = `${this.accessory.context.device.displayName} Vane`;
+    this.slatsService = existing || this.accessory.addService(this.platform.Service.Slats, name);
+    this.slatsService.setCharacteristic(C.Name, name);
+    // The blade that moves on these units tilts the airflow up and down.
+    this.slatsService.setCharacteristic(C.SlatType, C.SlatType.HORIZONTAL);
+    this.slatsService.getCharacteristic(C.CurrentSlatState).onGet(this.getCurrentSlatState.bind(this));
+    this.slatsService.getCharacteristic(C.CurrentTiltAngle)
+      .setProps({ minValue: -90, maxValue: 90, minStep: TILT_STEP });
+    this.slatsService.getCharacteristic(C.TargetTiltAngle)
+      .setProps({ minValue: -90, maxValue: 90, minStep: TILT_STEP })
+      .onGet(this.getTargetTiltAngle.bind(this))
+      .onSet(this.setTargetTiltAngle.bind(this));
+    this.syncVaneCharacteristics(this.currentStatus?.airDirection ?? 'auto');
+    this.linkSecondaryService(this.slatsService);
+    if (!existing) {
+      this.publishStructureChange();
+    }
+  }
+
+  private removeSlatsService(): void {
+    const existing = this.accessory.getService(this.platform.Service.Slats);
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.publishStructureChange();
+    }
+    this.slatsService = null;
   }
 
   async getCurrentTemperature(): Promise<CharacteristicValue> {
@@ -1979,6 +2197,21 @@ export class KumoThermostatAccessory {
     return value;
   }
 
+  /**
+   * The source's vane position, if this target can take it: swing needs
+   * `hasVaneSwing`, a fixed position or 'auto' needs `hasVaneDir`. Nothing until the
+   * target's profile has arrived, and nothing for units with fixed vanes.
+   */
+  private mirrorVane(v: string | undefined): VaneDirection | undefined {
+    if (!isVaneDirection(v) || !this.deviceProfile) {
+      return undefined;
+    }
+    if (v === 'swing') {
+      return this.deviceProfile.hasVaneSwing ? v : undefined;
+    }
+    return this.deviceProfile.hasVaneDir ? v : undefined;
+  }
+
   /** Collapse a raw source mode to a command mode (autoHeat/autoCool → auto, off if powered off). */
   private normalizeMirrorMode(desired: MirrorState): 'off' | 'heat' | 'cool' | 'auto' | 'dry' | 'vent' {
     if (desired.power === 0 || desired.operationMode === 'off') {
@@ -2058,6 +2291,12 @@ export class KumoThermostatAccessory {
         break;
     }
 
+    // Vane (since 2.0): only to a target that reports it can do that position.
+    const vane = this.mirrorVane(desired.airDirection);
+    if (mode !== 'off' && vane) {
+      commands.vaneDir = vane;
+    }
+
     this.platform.log.info(`[MIRROR] ${this.accessory.displayName}: applying ${JSON.stringify(commands)}`);
     this.noteModeIntent(commands.operationMode!);
 
@@ -2081,11 +2320,15 @@ export class KumoThermostatAccessory {
       if (fan) {
         this.currentStatus.fanSpeed = fan;
       }
+      if (commands.vaneDir) {
+        this.currentStatus.airDirection = commands.vaneDir;
+      }
 
       this.rememberActiveMode(this.currentStatus);
       this.refreshClimateCharacteristics();
       this.refreshThresholds(this.currentStatus);
       this.syncFanCharacteristics(this.currentStatus.fanSpeed);
+      this.syncVaneCharacteristics(this.currentStatus.airDirection);
       if (this.dryService) {
         this.dryService.updateCharacteristic(
           this.platform.Characteristic.On,

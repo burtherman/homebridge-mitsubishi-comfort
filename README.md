@@ -19,6 +19,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Each unit is a HomeKit heater-cooler** (since 2.0): power on/off separate from Heat / Cool / Auto, and a real Idle state when the compressor rests. Power-on returns to the unit's last mode
 - **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
 - **Fan speed** on each unit's tile: five speeds plus Auto
+- **Vane swing** on units with movable vanes, and optional fixed tilt positions
 - **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry" switches (HomeKit's heater-cooler has no mode for them)
 - **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
 - Current temperature, a humidity sensor on units that have one, and a filter-change indicator
@@ -100,6 +101,7 @@ Add the following to your Homebridge `config.json`:
 | `showDrySwitch` | boolean | No | Show a "Dry" switch on units that support dehumidify (default: true) |
 | `showFanOnlySwitch` | boolean | No | Show a "Fan Only" switch on units that support fan-only mode (default: true) |
 | `showHumiditySensor` | boolean | No | Show indoor humidity as a humidity sensor on units that report it (default: true). Turn off if it crowds the unit's tile in the Home app |
+| `exposeVaneSlat` | boolean | No | Show a vane tilt control with five fixed positions on units with movable vanes (default: false). Off by default because the Home app groups it with window coverings, so a "close the blinds" command can reach it |
 
 ### Recommended Configuration for Optimal Efficiency
 
@@ -204,7 +206,7 @@ Add a `mirror` array of `{ source, target }` device-serial pairs (serials appear
 How it behaves:
 
 - **One-way.** The target follows the source; the source is never affected by the target.
-- **On every source change, it copies the source's full state** — mode (heat/cool/auto/dry/vent/off), the setpoint(s), on/off, and fan speed.
+- **On every source change, it copies the source's full state** — mode (heat/cool/auto/dry/vent/off), the setpoint(s), on/off, fan speed and, on targets with movable vanes, vane position.
 - **Any control path triggers it.** Because it follows the source's *actual* state, changing the source from its **wall thermostat**, the **Kumo app**, or **HomeKit** all mirror across. HomeKit changes mirror in about a second; wall/app changes mirror when the plugin next reads the source (within one local poll, ~15s with `localControl` on, or a streaming tick otherwise).
 - **Manual target changes stick.** If you adjust the target directly, it stays put until the source changes again — at which point the target re-syncs to the source. (Since any source change re-applies the *full* state, changing only the source's temperature will also turn a manually-off target back on to match.)
 - **Safe across different units.** Setpoints are clamped to the target's own supported range, and a mode the target can't do is skipped.
@@ -212,7 +214,7 @@ How it behaves:
 Notes:
 
 - One source can drive several targets — add one entry per target.
-- Vane/louver direction, room temperature, and humidity are **not** mirrored (those are sensor readings, not settings).
+- Vane position is mirrored to a target that has movable vanes (since 2.0). Room temperature and humidity are **not** mirrored (those are sensor readings, not settings).
 - Like `localControl`, `mirror` is read from the **parent** Homebridge config, so changing it requires a **full Homebridge restart**.
 
 ## HomeKit Tile, Modes & Switches
@@ -224,12 +226,13 @@ Each unit is a HomeKit **heater-cooler**:
 - **Setpoints:** Heat shows the heat setpoint, Cool shows the cool setpoint, and Auto shows both as a two-handle band. Each is limited to the range the unit reports for that mode.
 - **Status** shows Heating, Cooling or Idle. Idle means the unit is on but the compressor is resting, or it's in fan-only mode.
 - **Fan speed** is a slider with five speeds (quietest at the bottom, most powerful at the top) and an Auto setting on units that support it. The fan's own on/off can turn the unit on but won't turn it off, so a room-wide "turn off the fan" can't shut down the heat pump. Use the unit's power control for that. A fan change on a unit that's off isn't sent; change it after turning the unit on, or in the same scene.
+- **Vanes** (units that report movable vanes): swing on/off is on the unit's tile. Turning swing off returns the vane to the last fixed position the unit was in. With `exposeVaneSlat` on, a separate vane control sets one of five fixed positions. Like fan speed, a vane change on a unit that's off isn't sent.
 - **Fan-only** is a separate **"Fan Only" switch** per unit (on units that support it). On = fan only; off = the unit powers down.
 - **Dry (dehumidify)** is a separate **"Dry" switch** per unit (on units that support it). While drying, the tile shows Cool, and its cool setpoint is the dry setpoint on units that have one. Fan and Dry are mutually exclusive.
 - **Humidity** appears as a humidity sensor on units that report it.
 - **Filter indicator.** A filter-change indication appears when the unit reports its filter needs cleaning.
 
-A scene that turns a unit on and sets its mode, temperature and fan speed at once ("on, cool, 72, fan quiet") is sent to the unit as one command, so the parts can't arrive out of order.
+A scene that turns a unit on and sets its mode, temperature, fan speed and swing at once ("on, cool, 72, fan quiet") is sent to the unit as one command, so the parts can't arrive out of order.
 
 > **Note:** HomeKit caches an accessory's services. If a newly-supported switch or sensor doesn't appear after an update, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough.
 
@@ -273,8 +276,9 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 
 ## Supported Characteristics
 
-- Heater Cooler: Active (power), Current Heater Cooler State (Inactive, Idle, Heating, Cooling), Target Heater Cooler State (Auto, Heat, Cool), Current Temperature, Heating / Cooling Threshold Temperature
+- Heater Cooler: Active (power), Current Heater Cooler State (Inactive, Idle, Heating, Cooling), Target Heater Cooler State (Auto, Heat, Cool), Current Temperature, Heating / Cooling Threshold Temperature, Swing Mode (units with vane swing)
 - Fan (linked to the heater-cooler): Active, Current Fan State, Rotation Speed (five speeds), Target Fan State (Auto/Manual, on units with an auto fan speed)
+- Slats: Current Slat State, Current / Target Tilt Angle (five positions; units with movable vanes, when `exposeVaneSlat` is on)
 - Humidity Sensor: Current Relative Humidity (when the unit has a sensor)
 - Filter Maintenance: Filter Change Indication (when reported)
 - "Fan Only" and "Dry" switches (per unit, capability-gated)
