@@ -386,6 +386,12 @@ export class KumoThermostatAccessory {
     } else {
       this.removeDrySwitch();
     }
+
+    // Controls added above (auto fan, swing, the switches) start with defaults. On an
+    // offline unit, cover them with No Response too.
+    if (!this.isReachable()) {
+      this.pushUnreachable();
+    }
   }
 
   /**
@@ -451,11 +457,14 @@ export class KumoThermostatAccessory {
       .onGet(this.getFanOnlyOn.bind(this))
       .onSet(this.setFanOnlyOn.bind(this));
 
-    // Reflect current state immediately if we already have a status
-    this.fanOnlyService.updateCharacteristic(
-      this.platform.Characteristic.On,
-      this.isFanOnlyActive(this.currentStatus),
-    );
+    // Reflect current state immediately if we already have a status (not while
+    // unreachable: that status is the cloud's frozen record)
+    if (this.isReachable()) {
+      this.fanOnlyService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isFanOnlyActive(this.currentStatus),
+      );
+    }
 
     // The profile arrives via an async streaming event, after the accessory
     // has already been published to the bridge. A service added now is invisible
@@ -582,11 +591,14 @@ export class KumoThermostatAccessory {
       .onGet(this.getDryOn.bind(this))
       .onSet(this.setDryOn.bind(this));
 
-    // Reflect current state immediately if we already have a status
-    this.dryService.updateCharacteristic(
-      this.platform.Characteristic.On,
-      this.isDryActive(this.currentStatus),
-    );
+    // Reflect current state immediately if we already have a status (not while
+    // unreachable: that status is the cloud's frozen record)
+    if (this.isReachable()) {
+      this.dryService.updateCharacteristic(
+        this.platform.Characteristic.On,
+        this.isDryActive(this.currentStatus),
+      );
+    }
 
     // The profile arrives via an async streaming event, after the accessory
     // has already been published to the bridge. A service added now is invisible
@@ -675,11 +687,22 @@ export class KumoThermostatAccessory {
       this.filterMaintenanceService =
         this.accessory.getService(this.platform.Service.FilterMaintenance) ||
         this.accessory.addService(this.platform.Service.FilterMaintenance);
+      // A read handler, so an offline unit's filter reports No Response like
+      // everything else instead of a cached value.
+      this.filterMaintenanceService.getCharacteristic(this.platform.Characteristic.FilterChangeIndication)
+        .onGet(() => {
+          this.assertReachable();
+          const C = this.platform.Characteristic.FilterChangeIndication;
+          return this.currentStatus?.filterDirty ? C.CHANGE_FILTER : C.FILTER_OK;
+        });
       this.linkSecondaryService(this.filterMaintenanceService);
       this.publishStructureChange();
       this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
     }
 
+    if (!this.isReachable()) {
+      return;
+    }
     this.filterMaintenanceService.updateCharacteristic(
       this.platform.Characteristic.FilterChangeIndication,
       filterDirty
@@ -938,6 +961,7 @@ export class KumoThermostatAccessory {
       this.service.updateCharacteristic(characteristic, err as never);
     }
     this.humidityService?.updateCharacteristic(C.CurrentRelativeHumidity, err as never);
+    this.filterMaintenanceService?.updateCharacteristic(C.FilterChangeIndication, err as never);
     if (this.fanService) {
       const fanChars = [C.Active, C.CurrentFanState, C.RotationSpeed];
       if (this.targetFanStateRegistered) {
@@ -1224,6 +1248,7 @@ export class KumoThermostatAccessory {
         this.platform.log.debug(
           `[${this.deviceSerial}] Unreachable — cached ${source} update without publishing to HomeKit`,
         );
+        this.pushUnreachable(); // covers anything this update just added, e.g. the humidity sensor
         return;
       }
 
@@ -1354,7 +1379,9 @@ export class KumoThermostatAccessory {
 
   /** Push Active and both heater-cooler states from the cached status. */
   private refreshClimateCharacteristics(): void {
-    if (!this.currentStatus) {
+    // Never publish over No Response: an offline unit's cached status is the
+    // cloud's frozen record, not live state.
+    if (!this.currentStatus || !this.isReachable()) {
       return;
     }
     const C = this.platform.Characteristic;
@@ -1369,6 +1396,9 @@ export class KumoThermostatAccessory {
 
   /** Push both setpoints (thresholds) from a status, skipping missing values. */
   private refreshThresholds(status: DeviceStatus): void {
+    if (!this.isReachable()) {
+      return;
+    }
     const C = this.platform.Characteristic;
     const heat = this.validSetpoint(status.spHeat);
     const cool = this.validSetpoint(status.spCool);
@@ -1931,6 +1961,9 @@ export class KumoThermostatAccessory {
     if (known && known !== 'auto') {
       this.lastManualFan = known;
     }
+    if (!this.isReachable()) {
+      return;
+    }
     if (this.targetFanStateRegistered) {
       this.fanService.updateCharacteristic(
         C.TargetFanState, known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL);
@@ -1971,6 +2004,9 @@ export class KumoThermostatAccessory {
     const swinging = vane === 'swing';
     if (!swinging && isVaneDirection(vane) && vane !== 'auto') {
       this.lastFixedVane = vane;
+    }
+    if (!this.isReachable()) {
+      return;
     }
     if (this.swingModeRegistered) {
       this.service.updateCharacteristic(
