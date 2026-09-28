@@ -511,6 +511,11 @@ export class KumoThermostatAccessory {
    * switch still carrying the old default name is renamed: a name set in the Home
    * app (stored in ConfiguredName) is left alone. The subtype is unchanged, so
    * automations on the switch keep working.
+   *
+   * The plugin sets Name and ConfiguredName together, and a Home app rename changes
+   * only ConfiguredName, so a ConfiguredName still equal to Name was never renamed.
+   * That matters when the unit was renamed in the Comfort app after 1.x created the
+   * switch (2026-09-28: "Front bedroom Fan" on a unit now called "Front Bedroom").
    */
   private renameLegacyFanSwitch(): void {
     if (!this.fanOnlyService) {
@@ -519,8 +524,11 @@ export class KumoThermostatAccessory {
     const C = this.platform.Characteristic;
     const displayName = this.accessory.context.device.displayName;
     const oldName = `${displayName} Fan`;
+    const name = this.fanOnlyService.getCharacteristic(C.Name).value;
     const configured = this.fanOnlyService.getCharacteristic(C.ConfiguredName).value;
-    if (configured !== undefined && configured !== null && configured !== '' && configured !== oldName) {
+    const current = configured === undefined || configured === null || configured === '' ? name : configured;
+    const renamedInHome = current !== name && String(current).toLowerCase() !== oldName.toLowerCase();
+    if (renamedInHome || typeof current !== 'string' || !current.endsWith(' Fan')) {
       return;
     }
     const newName = `${displayName} Fan Only`;

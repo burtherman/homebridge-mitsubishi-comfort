@@ -262,6 +262,30 @@ test('a cached fan-only switch with the 1.x default name becomes "Fan Only"', ()
   assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Kitchen Fan Only');
 });
 
+// Found on the Pi 2026-09-28 by the portal-dashboard session: the front bedroom's 1.x
+// switch is "Front bedroom Fan" (Name and ConfiguredName), but the unit is now called
+// "Front Bedroom" in the Comfort app. Comparing against "<current unit name> Fan" read
+// it as a custom name, leaving "Front bedroom Fan" (fan-only) next to the new
+// "Front Bedroom Fan" (fan speed).
+test('a 1.x switch whose unit was renamed since is still recognized as the default', () => {
+  const accessory = makeAccessory('Front Bedroom', SERIAL);
+  const sw = accessory.addService(Service.Switch, 'Front bedroom Fan', 'fan-only');
+  sw.setCharacteristic(C.Name, 'Front bedroom Fan');
+  sw.setCharacteristic(C.ConfiguredName, 'Front bedroom Fan');
+  makeHarness({ accessory });
+  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Front Bedroom Fan Only');
+  assert.strictEqual(sw.getCharacteristic(C.Name).value, 'Front Bedroom Fan Only');
+});
+
+test('a Home app rename is kept even when the plugin-set name is a 1.x default', () => {
+  const accessory = makeAccessory('Front Bedroom', SERIAL);
+  const sw = accessory.addService(Service.Switch, 'Front bedroom Fan', 'fan-only');
+  sw.setCharacteristic(C.Name, 'Front bedroom Fan');
+  sw.setCharacteristic(C.ConfiguredName, 'Bedroom breeze');
+  makeHarness({ accessory });
+  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Bedroom breeze');
+});
+
 test('a fan-only switch renamed in the Home app keeps its name', () => {
   const accessory = makeAccessory('Kitchen', SERIAL);
   const sw = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
