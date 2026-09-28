@@ -184,3 +184,14 @@ test('threshold writes to a powered-off unit are cached, not sent', async () => 
     'no bare setpoint is sent to an off unit (would 400 modeRequiredWhenDeviceOff)');
   assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22.3, 'cached + echoed so the handle holds');
 });
+
+test('the tile keeps the whole-°F value after HomeKit stores the raw written one', async () => {
+  // hap-nodejs stores the value as sent after onSet resolves (22.0), over the
+  // quantized echo (22.3). The plugin re-pushes on a later tick.
+  const { handler, accessory } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'cool' }));
+  await handler.setCoolingThresholdTemperature(22.0);
+  heaterCooler(accessory).getCharacteristic(Characteristic.CoolingThresholdTemperature).value = 22.0;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(charValue(accessory, 'CoolingThresholdTemperature'), 22.3);
+});

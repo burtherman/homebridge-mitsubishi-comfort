@@ -1380,6 +1380,32 @@ export class KumoThermostatAccessory {
     }
   }
 
+  /**
+   * Re-push the controls a HomeKit write can leave showing the value as sent rather
+   * than what the unit got. hap-nodejs stores the client's value after onSet
+   * resolves, over anything the handler pushed, so this runs on a later tick.
+   */
+  private republishAfterWrite(): void {
+    if (!this.currentStatus || !this.isReachable()) {
+      return;
+    }
+    this.refreshClimateCharacteristics();
+    this.syncFanCharacteristics(this.currentStatus.fanSpeed);
+    this.syncVaneCharacteristics(this.currentStatus.airDirection);
+  }
+
+  /** Push a setpoint now and again after hap-nodejs stores the raw written value. */
+  private echoSetpoint(field: SetpointField, value: number): void {
+    const C = this.platform.Characteristic;
+    const char = field === 'spHeat' ? C.HeatingThresholdTemperature : C.CoolingThresholdTemperature;
+    this.service.updateCharacteristic(char, value);
+    setTimeout(() => {
+      if (this.isReachable()) {
+        this.service.updateCharacteristic(char, value);
+      }
+    }, 0);
+  }
+
   private validSetpoint(v: number | null | undefined): number | undefined {
     return typeof v === 'number' && !isNaN(v) ? v : undefined;
   }
@@ -1575,7 +1601,13 @@ export class KumoThermostatAccessory {
           this.intentFlush = null;
           this.flushIntent(intent)
             .catch((err) => this.platform.log.error(`${this.accessory.displayName}: power/mode/fan error:`, err))
-            .then(resolve, resolve);
+            .then(() => {
+              resolve();
+              // After resolve() returns, hap-nodejs stores each written value as sent
+              // (a slider's 30 over our 25, a mode we declined to send). Republish
+              // the real state once it has.
+              setTimeout(() => this.republishAfterWrite(), 0);
+            });
         }, 0);
       });
     }
@@ -2127,7 +2159,7 @@ export class KumoThermostatAccessory {
         `[${label}] ${this.accessory.displayName}: unit is off / turning off — caching ${temp}°C without sending`,
       );
       this.currentStatus[field] = temp;
-      this.service.updateCharacteristic(characteristic, temp);
+      this.echoSetpoint(field, temp);
       // Off but not being turned off: a power-on in this same burst carries it
       // (see attachSameBurstSetpoints). Setpoints trailing an off are never kept.
       if (!this.offInFlight()) {
@@ -2153,7 +2185,7 @@ export class KumoThermostatAccessory {
       if (this.currentStatus) {
         this.currentStatus[field] = temp;
       }
-      this.service.updateCharacteristic(characteristic, temp);
+      this.echoSetpoint(field, temp);
       return;
     }
 
@@ -2162,7 +2194,7 @@ export class KumoThermostatAccessory {
     if (success) {
       this.platform.log.info(`[${label}] ${this.accessory.displayName}: Command accepted by API`);
       this.currentStatus[field] = temp;
-      this.service.updateCharacteristic(characteristic, temp);
+      this.echoSetpoint(field, temp);
       // Mirror a HomeKit-driven AUTO-handle change to any followers immediately.
       this.notifyStatusListeners();
     } else {

@@ -245,3 +245,27 @@ test('a fan-only switch renamed in the Home app keeps its name', () => {
   makeHarness({ accessory });
   assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Breeze');
 });
+
+// ---- After HomeKit stores the raw written value ---------------------------------
+// hap-nodejs stores a write's value as sent AFTER onSet resolves, over anything the
+// handler pushed: a slider's 30 over our 25, or a speed we declined to send to an
+// off unit. The plugin republishes on a later tick. (Found by the portal-dashboard
+// session driving a real hap-nodejs bridge.)
+
+test('the slider shows the real speed position after HomeKit stores the raw value', async () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone());
+  await handler.setRotationSpeed(30);
+  fan.getCharacteristic(C.RotationSpeed).value = 30; // what hap-nodejs does next
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 25);
+});
+
+test('a fan change not sent to an off unit snaps the slider back', async () => {
+  const { handler, fan } = makeHarness();
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0, fanSpeed: 'low' }));
+  await handler.setRotationSpeed(100);
+  fan.getCharacteristic(C.RotationSpeed).value = 100;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 50, 'back to low');
+});
