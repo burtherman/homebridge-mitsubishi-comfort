@@ -263,6 +263,7 @@ export class KumoThermostatAccessory {
         .onGet(this.getFanOnlyOn.bind(this))
         .onSet(this.setFanOnlyOn.bind(this));
       this.renameLegacyFanSwitch();
+      this.linkSecondaryService(this.fanOnlyService);
     }
 
     // Same for a cached dry switch (see setupDrySwitch / hasModeDry).
@@ -275,6 +276,7 @@ export class KumoThermostatAccessory {
       this.dryService.getCharacteristic(this.platform.Characteristic.On)
         .onGet(this.getDryOn.bind(this))
         .onSet(this.setDryOn.bind(this));
+      this.linkSecondaryService(this.dryService);
     }
 
     // A cached Slats (vane) service needs its handlers now too; applyDeviceProfile
@@ -452,6 +454,9 @@ export class KumoThermostatAccessory {
 
     this.fanOnlyService.setCharacteristic(this.platform.Characteristic.Name, switchName);
     this.fanOnlyService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
+    // Linked like the fan, humidity and filter. Left unlinked, the Home app groups the
+    // unit as a heater-cooler plus two switches and draws the tile as a switch.
+    this.linkSecondaryService(this.fanOnlyService);
 
     this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
       .onGet(this.getFanOnlyOn.bind(this))
@@ -586,6 +591,9 @@ export class KumoThermostatAccessory {
 
     this.dryService.setCharacteristic(this.platform.Characteristic.Name, switchName);
     this.dryService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
+    // Linked like the fan, humidity and filter. Left unlinked, the Home app groups the
+    // unit as a heater-cooler plus two switches and draws the tile as a switch.
+    this.linkSecondaryService(this.dryService);
 
     this.dryService.getCharacteristic(this.platform.Characteristic.On)
       .onGet(this.getDryOn.bind(this))
