@@ -207,6 +207,7 @@ export class KumoThermostatAccessory {
 
     this.service = this.accessory.getService(this.platform.Service.HeaterCooler) ||
       this.accessory.addService(this.platform.Service.HeaterCooler);
+    this.moveTileServiceFirst();
 
     this.service.setCharacteristic(
       this.platform.Characteristic.Name,
@@ -739,6 +740,28 @@ export class KumoThermostatAccessory {
     if (!existing) {
       this.publishStructureChange();
     }
+  }
+
+  /**
+   * Put the HeaterCooler first after AccessoryInformation. On a unit upgraded from
+   * 1.x it's added after the cached Dry and Fan Only switches, and the Home app drew
+   * the combined tile as a switch ("All Off"), even with the HeaterCooler marked
+   * primary and the switches linked to it. 1.x's Thermostat came first and drew
+   * correctly. Only the array order changes: hap-nodejs keys instance IDs by service
+   * type and subtype, so automations bound to the switches are unaffected.
+   */
+  private moveTileServiceFirst(): void {
+    const services = (this.accessory as { services?: Service[] }).services;
+    if (!Array.isArray(services)) {
+      return;
+    }
+    const from = services.indexOf(this.service);
+    const to = services.findIndex((s) => s.UUID === this.platform.Service.AccessoryInformation.UUID) + 1;
+    if (from <= to) {
+      return;
+    }
+    services.splice(from, 1);
+    services.splice(to, 0, this.service);
   }
 
   /**
