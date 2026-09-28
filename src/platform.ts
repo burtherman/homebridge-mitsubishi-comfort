@@ -981,6 +981,9 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
           continue;
         }
         try {
+          // Stamped before the read: a command sent while it's in flight makes it
+          // stale, and updateFromLocal drops it.
+          const readStartedAt = Date.now();
           const status = await this.localClient.getStatus(serial);
           if (status) {
             this.lastLocalPollSuccessTs = Date.now();
@@ -992,7 +995,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
               status.humidity = humidity.humidity;
               this.noteSensorBattery(serial, humidity.battery);
             }
-            handler.updateFromLocal(status);
+            handler.updateFromLocal(status, readStartedAt);
           }
         } catch (error) {
           this.log.debug(`Local poll error for ${serial}: ${(error as Error).message}`);

@@ -107,6 +107,50 @@ test('updateFromLocal feeds a locally-read status into the characteristics', asy
   assert.strictEqual(await handler.getCoolingThresholdTemperature(), 23, 'cool mode surfaces spCool');
 });
 
+// ---- a read that started before our command --------------------------------
+//
+// Found live 2026-09-27. The poller reads a unit's status, then its humidity, then
+// applies both. A command queued on the unit's lock between those reads goes out
+// first, and the pre-command status was then applied on top of it. At 21:10:52 the
+// kitchen was turned off; at 21:10:54 its pre-off read landed, the tile flipped back
+// to heat, and the mirror turned the living room back ON until the next poll.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a local read that started before our command is dropped when it lands after it', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }));
+  const seen = [];
+  handler.onStatusUpdate((s) => seen.push(s.operationMode));
+
+  const readStartedAt = Date.now();
+  await sleep(2);
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await sleep(20);
+  assert.deepStrictEqual(local.calls.map((c) => c.commands.operationMode), ['off'], 'the off went out');
+
+  // The read that was in flight when the off was sent: still says heat.
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }), readStartedAt);
+
+  assert.strictEqual(await handler.getActive(), Characteristic.Active.INACTIVE, 'tile stays off');
+  assert.ok(!seen.slice(seen.indexOf('off')).includes('heat'), 'the mirror never sees the stale heat');
+});
+
+test('a local read that started after our command still applies', async () => {
+  const local = makeLocalClient();
+  const { handler } = makeHarness({ localClient: local });
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }));
+
+  await handler.setActive(Characteristic.Active.INACTIVE);
+  await sleep(20);
+  await sleep(2);
+  // Someone turned it back on at the wall; this read started after the off.
+  handler.updateFromLocal(localStatus({ operationMode: 'heat' }), Date.now());
+
+  assert.strictEqual(await handler.getActive(), Characteristic.Active.ACTIVE);
+});
+
 // ---- local authoritative --------------------------------------------------
 
 test('a cloud update is dropped while a recent local poll exists', async () => {

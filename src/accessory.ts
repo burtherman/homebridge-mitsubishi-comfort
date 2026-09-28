@@ -1046,8 +1046,20 @@ export class KumoThermostatAccessory {
    * when a unit has no local humidity source it's absent and we keep whatever
    * streaming/cloud last reported rather than wiping it.
    */
-  public updateFromLocal(status: Partial<DeviceStatus>) {
+  public updateFromLocal(status: Partial<DeviceStatus>, readStartedAt?: number) {
     if (status.roomTemp === undefined || status.roomTemp === null) {
+      return;
+    }
+    // A read that started before our latest command describes the unit as it was
+    // before that command, however late it lands. The poller reads status, then
+    // humidity, then applies both, so a command queued on the unit's lock between
+    // the two reads goes out first. Found live 2026-09-27: the kitchen's pre-off read
+    // landed 2s after the off, flipped the tile back to heat, and the mirror turned
+    // the living room back on until the next poll.
+    if (readStartedAt !== undefined && readStartedAt <= this.lastCommandAt) {
+      this.platform.log.debug(
+        `[${this.deviceSerial}] Ignoring a local read that started before our last command`,
+      );
       return;
     }
     const updateTimestamp = Date.now();
