@@ -59,6 +59,7 @@ npm link
 - **Automations and scenes that controlled a unit's thermostat stop working and need to be recreated.** Open each one in the Home app after upgrading and set the unit again (for example "Kitchen: Off").
 - **Automations on the Dry and Fan switches keep working.** The "Fan" switch is renamed "Fan Only" (it means fan-only mode, not fan speed, which is now its own control), unless you renamed it yourself.
 - Power is now its own control. An "off" automation sets the unit to Off regardless of its mode, including dry and fan-only.
+- **Tiles come back small.** A large thermostat tile returns as a small tile, where tapping the icon turns the unit on or off. To make it large again: on the Home tab tap the More button (…), choose **Edit Home View**, tap the tile, tap the resize button, then **Done**.
 
 If the Home app still shows the old thermostat, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough to clear HomeKit's cache.
 
