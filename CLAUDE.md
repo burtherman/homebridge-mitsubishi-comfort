@@ -182,7 +182,7 @@ schema, release).
 | Fanv2.Active / CurrentFanState | power/mode/standby | Follows the unit. **Fan-tile OFF is refused** (a room-wide "turn off the fan" must not stop the heat pump); ON = setActive(1) |
 | HeaterCooler.SwingMode | airDirection === 'swing' | Registered only if `hasVaneSwing`. OFF restores `lastFixedVane` ('auto' if none seen) |
 | Slats.TargetTiltAngle / CurrentTiltAngle / CurrentSlatState | airDirection | Opt-in `exposeVaneSlat` + `hasVaneDir`. -90/-45/0/45/90 = horizontal/midhorizontal/midpoint/midvertical/vertical; nearest wins |
-| HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler |
+| HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler. Created on the first reading; removed only when the cloud's zone record says `hasSensor: false`, `hasMhk2` not true and `humidity: null` (`applyZoneSensors`, at startup and on fallback polls). A missing reading alone never removes it |
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
 | Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Named "Fan" in 1.x; renamed only if it still has the old default ConfiguredName |

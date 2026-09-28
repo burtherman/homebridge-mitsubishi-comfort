@@ -350,6 +350,8 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             // Create accessory handler
             const handler = new KumoThermostatAccessory(this, existingAccessory, this.kumoAPI, this.kumoConfig.pollInterval);
             this.accessoryHandlers.push(handler);
+            // A cached humidity tile on a unit that no longer has a sensor goes away.
+            handler.applyZoneSensors(zone.adapter);
 
             // Update accessory if needed
             this.api.updatePlatformAccessories([existingAccessory]);

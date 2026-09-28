@@ -161,10 +161,18 @@ export interface LocalHumidity {
 type LocalHumiditySource =
   | { kind: 'sensor'; slot: number }
   | { kind: 'mhk2' }
-  | { kind: 'none' };
+  | { kind: 'none'; at: number };
 
 /** Max external sensor slots probed on a unit (matches the reference library). */
 const MAX_SENSOR_SLOTS = 4;
+
+/**
+ * How long "this unit has no humidity source" is trusted before probing again. It
+ * used to be cached for the life of the process, so a sensor paired to a unit after
+ * startup was never read over the LAN (2026-09-28: the sensor moved from the kitchen
+ * to the living room). A re-probe costs one or two requests.
+ */
+export const HUMIDITY_NONE_RECHECK_MS = 10 * 60 * 1000;
 
 export class LocalKumoClient {
   private readonly creds = new Map<string, LocalDeviceCreds>();
@@ -348,7 +356,7 @@ export class LocalKumoClient {
    */
   async getHumidity(serial: string): Promise<LocalHumidity | null> {
     const cached = this.humiditySource.get(serial);
-    if (cached?.kind === 'none') {
+    if (cached?.kind === 'none' && Date.now() - cached.at < HUMIDITY_NONE_RECHECK_MS) {
       return null;
     }
     if (cached?.kind === 'sensor') {
@@ -384,7 +392,7 @@ export class LocalKumoClient {
       this.humiditySource.set(serial, { kind: 'mhk2' });
       return { humidity: h };
     }
-    this.humiditySource.set(serial, { kind: 'none' });
+    this.humiditySource.set(serial, { kind: 'none', at: Date.now() });
     return null;
   }
 

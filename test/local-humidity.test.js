@@ -11,7 +11,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { LocalKumoClient } = require('../dist/local-api.js');
+const { LocalKumoClient, HUMIDITY_NONE_RECHECK_MS } = require('../dist/local-api.js');
 
 const NOOP_LOG = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -88,4 +88,31 @@ test('a cached sensor that stops answering is re-discovered', async () => {
   assert.strictEqual(await client.getHumidity('S'), null);           // source gone → drop cache
   hum = 60;
   assert.strictEqual((await client.getHumidity('S')).humidity, 60);  // re-discovered
+});
+
+// 2026-09-28: the sensor moved from the kitchen to the living room after the plugin had
+// started. "None" was cached for the life of the process, so the living room's new
+// sensor was never read over the LAN until a restart. "None" now expires.
+test('a unit with no source is probed again after the recheck interval and finds a new sensor', async () => {
+  let paired = false;
+  const { client } = makeClient((body) => {
+    if (body.includes('"sensors":{"0"')) {
+      return { sensors: { '0': paired ? { uuid: 'abc', humidity: 60.4 } : { uuid: null } } };
+    }
+    if (body.includes('mhk2')) return { mhk2: null };
+    return null;
+  });
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    assert.strictEqual(await client.getHumidity('S'), null);
+    paired = true;                                       // the sensor is paired to this unit
+    now += HUMIDITY_NONE_RECHECK_MS - 1000;
+    assert.strictEqual(await client.getHumidity('S'), null, 'still trusting "none"');
+    now += 2000;
+    assert.deepStrictEqual(await client.getHumidity('S'), { humidity: 60.4, battery: undefined, rssi: undefined });
+  } finally {
+    Date.now = realNow;
+  }
 });

@@ -341,3 +341,36 @@ test('TEMPORARY: cloud updates are logged for a minute after a LAN command, not 
   assert.strictEqual(watched.length, 1);
   assert.match(watched[0], /via polling: power=1 mode=heat/);
 });
+
+// ---- a humidity tile on a unit that lost its sensor (2026-09-28) -------------
+//
+// The sensor moved from the kitchen to the living room. The living room got a tile on
+// its first reading; the kitchen kept a tile reading 0%. The cloud's zone record says
+// outright whether a unit has a sensor or wall controller.
+
+test('the cloud record saying no sensor removes the humidity tile; a new reading brings it back', async () => {
+  const { handler, platform } = makeHarness();
+  let published = 0;
+  platform.api.updatePlatformAccessories = () => { published += 1; };
+  handler.updateFromZone(cloudZone({ humidity: 55 }));
+  const accessory = handler.accessory;
+  assert.ok(accessory.getService(Service.HumiditySensor), 'tile created on the first reading');
+
+  handler.applyZoneSensors({ hasSensor: false, hasMhk2: false, humidity: null });
+  assert.strictEqual(accessory.getService(Service.HumiditySensor), null, 'tile removed');
+  assert.ok(published > 0, 'structure change published');
+
+  handler.updateFromZone(cloudZone({ humidity: 58, hasSensor: true }));
+  assert.ok(accessory.getService(Service.HumiditySensor), 'back when a sensor reports again');
+});
+
+test('the humidity tile stays unless the record says no sensor, no wall control and no reading', () => {
+  const { handler } = makeHarness();
+  handler.updateFromZone(cloudZone({ humidity: 55 }));
+  const accessory = handler.accessory;
+  handler.applyZoneSensors({ humidity: null });                                    // streaming gap
+  handler.applyZoneSensors({ hasSensor: true, hasMhk2: false, humidity: null });   // sensor still paired
+  handler.applyZoneSensors({ hasSensor: false, hasMhk2: true, humidity: null });   // wall control
+  handler.applyZoneSensors({ hasSensor: false, hasMhk2: false, humidity: 50 });    // a reading from somewhere
+  assert.ok(accessory.getService(Service.HumiditySensor));
+});

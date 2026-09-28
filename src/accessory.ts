@@ -1069,10 +1069,37 @@ export class KumoThermostatAccessory {
     this.dryService?.updateCharacteristic(C.On, this.isDryActive(this.currentStatus));
   }
 
+  /**
+   * The cloud's zone record says outright whether a unit has a wireless sensor or a
+   * wall controller (`hasSensor`, `hasMhk2`). With neither and no humidity reading,
+   * nothing can feed a humidity tile, so the unit's tile is removed. Found 2026-09-28:
+   * the sensor moved from the kitchen to the living room; the living room got a tile
+   * on its first reading, but the kitchen kept one reading 0%. Only this explicit
+   * record is used, not a missing reading: streaming updates sometimes leave humidity
+   * out, and a tile that comes and goes on those gaps upsets HomeKit. The platform
+   * calls this with the zone record at startup; fallback polls pass it too.
+   */
+  public applyZoneSensors(adapter: { hasSensor?: boolean; hasMhk2?: boolean; humidity?: number | null }): void {
+    if (!this.humidityService || adapter.hasSensor !== false || adapter.hasMhk2 === true) {
+      return;
+    }
+    if (adapter.humidity !== null && adapter.humidity !== undefined) {
+      return;
+    }
+    this.accessory.removeService(this.humidityService);
+    this.humidityService = null;
+    this.hasHumiditySensor = false;
+    this.publishStructureChange();
+    this.platform.log.info(
+      `${this.accessory.displayName}: the cloud reports no humidity sensor on this unit; removed its humidity tile`,
+    );
+  }
+
   // Called by platform when new zone data is available
   public updateFromZone(zone: Zone) {
     const updateTimestamp = Date.now();
     if (zone.adapter) {
+      this.applyZoneSensors(zone.adapter);
       this.logCloudWatch(zone.adapter as unknown as Record<string, unknown>, 'polling');
       this.noteCloudSync(zone.adapter);
     }
