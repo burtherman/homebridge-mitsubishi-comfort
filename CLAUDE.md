@@ -197,6 +197,25 @@ room survive; automations bound to the thermostat must be recreated. Switch subt
 unchanged, so switch automations survive. Owner's install: one automation (skylight opens →
 all units off) — rebuild it right after upgrading and verify from the log.
 
+**Home app tile (observed 2026-09-27, owner's iPhone):**
+- Every upgraded unit's *combined* tile drew as a switch ("All Off"), even at the large size.
+  "Show as Separate Tiles" draws the heater-cooler correctly, so the services are fine.
+- Primary + linked services do NOT control the combined tile's look. Linking the switches
+  (`004a583`) didn't change it. The fork found the same with its humidity sensor
+  (fork commit 6caceef).
+- `moveTileServiceFirst` (`a7f6aa2`) lists the HeaterCooler first, the way 1.x's Thermostat
+  was. It's untested on the phone: the owner moved to separate tiles first. Instance IDs
+  are keyed by type + subtype, so the reorder is harmless (`test/tile-order.test.js`).
+- **No fan Auto control** appeared, though `TargetFanState` is published on every unit. The
+  fork's research says the Home app shows it as Manual | Auto. The Home app sent
+  `TargetFanState` AUTO with two mode changes (21:38:24 and 21:38:30), so a mode change
+  may reset the fan to auto. Unconfirmed.
+- The fork tried fan auto as the slider's 0% first and dropped it (fork commit db4d2bb):
+  0% reads as off, and in auto the unit may blow hard while the slider shows the slowest.
+- Kitchen fan: 100% (superPowerful) was sent and a local poll ~14s later reported
+  `powerful`. The units' profiles say 3 speeds, and the fork's claim that 3-speed units
+  accept all five doesn't hold here. The per-unit speed test is still pending.
+
 ### Power and mode (2.0)
 
 - **Power-on restores the last active mode.** HomeKit sends Active=1 with no mode, and an
