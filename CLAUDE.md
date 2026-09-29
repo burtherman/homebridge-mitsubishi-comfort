@@ -381,6 +381,11 @@ Likewise, HTTP 200 from `/devices/send-command` only means the cloud queued it.
   but is **not** published to HomeKit and does **not** fire the mirror hook — a frozen
   reading must never be pushed onto a live mirror target.
 - Recovery republishes real state and clears the error.
+- **The cloud doesn't reliably push "connected" (2.0).** It pushed the front bedroom's
+  disconnect (2026-09-28 20:42) but nothing when it returned (~21:14), so it sat at No
+  Response. `kumo-api.ts:recheckOfflineDevices` re-emits `device_status_v2` for each unit
+  marked offline every 60s from the health timer; `handleDeviceStatus` logs the offline
+  warning once and "reported online again" on recovery.
 
 **Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
 regardless and does not propagate HAP error status. Confirm in the Home app, or by

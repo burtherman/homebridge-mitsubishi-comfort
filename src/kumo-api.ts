@@ -125,6 +125,9 @@ export class KumoAPI {
   // Device profile and connection status
   private deviceProfiles: Map<string, DeviceProfile> = new Map();
   private deviceConnectionStatus: Map<string, boolean> = new Map();
+  // Re-asking the cloud about units marked offline; see recheckOfflineDevices.
+  private static readonly OFFLINE_RECHECK_MS = 60000;
+  private lastOfflineRecheck = 0;
   private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
   private deviceConnectionCallbacks: Set<DeviceConnectionCallback> = new Set();
 
@@ -830,28 +833,7 @@ export class KumoAPI {
         }
       });
 
-      this.socket.on('device_status_v2', (data: any) => {
-        const serial = data.deviceSerial;
-        if (!serial) {
-          return;
-        }
-        const isConnected = data.status !== 'disconnected';
-        const wasConnected = this.deviceConnectionStatus.get(serial);
-        this.deviceConnectionStatus.set(serial, isConnected);
-
-        if (!isConnected) {
-          this.log.warn(`Device ${serial} reported offline (reason: ${data.lastDisconnectedReason || 'unknown'})`);
-        } else {
-          this.log.debug(`Device status for ${serial}: ${data.status}`);
-        }
-
-        // Notify callbacks on status change
-        if (wasConnected !== isConnected) {
-          for (const callback of this.deviceConnectionCallbacks) {
-            callback(serial, isConnected);
-          }
-        }
-      });
+      this.socket.on('device_status_v2', (data: any) => this.handleDeviceStatus(data));
 
       this.socket.on('profile_update', (data: any) => {
         const serial = data.deviceSerial;
@@ -1268,6 +1250,56 @@ export class KumoAPI {
     }
   }
 
+  /** A `device_status_v2` answer or push: a unit's connection to the cloud. */
+  private handleDeviceStatus(data: { deviceSerial?: string; status?: string; lastDisconnectedReason?: string }): void {
+    const serial = data.deviceSerial;
+    if (!serial) {
+      return;
+    }
+    const isConnected = data.status !== 'disconnected';
+    const wasConnected = this.deviceConnectionStatus.get(serial);
+    this.deviceConnectionStatus.set(serial, isConnected);
+
+    if (!isConnected && wasConnected !== false) {
+      this.log.warn(`Device ${serial} reported offline (reason: ${data.lastDisconnectedReason || 'unknown'})`);
+    } else if (isConnected && wasConnected === false) {
+      this.log.info(`Device ${serial} reported online again`);
+    } else {
+      this.log.debug(`Device status for ${serial}: ${data.status}`);
+    }
+
+    // Notify callbacks on status change
+    if (wasConnected !== isConnected) {
+      for (const callback of this.deviceConnectionCallbacks) {
+        callback(serial, isConnected);
+      }
+    }
+  }
+
+  /**
+   * The cloud pushes `device_status_v2` when a unit drops off, but not reliably when
+   * it comes back. Found 2026-09-28: the front bedroom was reported offline at 20:42
+   * and 21:09, reported to the cloud again at 21:14 (its status record's
+   * `lastUpdated`), and the plugin kept it at No Response for over an hour. While a
+   * unit is marked offline, ask for its status again every OFFLINE_RECHECK_MS; the
+   * answer goes through handleDeviceStatus and brings it back. Startup uses the same
+   * request.
+   */
+  private recheckOfflineDevices(): void {
+    const now = Date.now();
+    if (now - this.lastOfflineRecheck < KumoAPI.OFFLINE_RECHECK_MS) {
+      return;
+    }
+    const offline = [...this.deviceConnectionStatus].filter(([, c]) => c === false).map(([serial]) => serial);
+    if (offline.length === 0) {
+      return;
+    }
+    this.lastOfflineRecheck = now;
+    for (const serial of offline) {
+      this.socket?.emit('device_status_v2', serial);
+    }
+  }
+
   /**
    * Start periodic health checks
    */
@@ -1279,6 +1311,7 @@ export class KumoAPI {
     this.healthCheckTimer = setInterval(() => {
       this.checkStreamingHealth();
       this.checkStreamingLiveness();
+      this.recheckOfflineDevices();
     }, this.streamingHealthCheckInterval);
 
     this.log.debug('Started streaming health checks');
