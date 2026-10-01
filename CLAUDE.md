@@ -387,6 +387,21 @@ Likewise, HTTP 200 from `/devices/send-command` only means the cloud queued it.
   marked offline every 60s from the health timer; `handleDeviceStatus` logs the offline
   warning once and "reported online again" on recovery.
 
+**Half-dead cloud links (2.0).** An adapter can stay "connected" to the cloud while commands
+never reach it (front bedroom, 2026-09-30: 8 commands accepted then reported back as off; the
+Comfort app said connected; fixed by a breaker power cycle). No device_status_v2 ever comes.
+For cloud-only units (`!hasLocalControl()`), `accessory.ts` "Cloud liveness" marks the unit
+unresponsive (`isReachable` false) on two unconfirmed cloud commands in a row
+(`watchForCloudConfirmation` path 'cloud'; a superseded command counts only if the cloud had
+already reported something else) or two unanswered status requests (`checkLiveness`, every
+5 min, asks only if no device_update for 5 min; `kumo-api.ts:getLastDeviceUpdateAt`). Clears
+on a late confirmation, a changed roomTemp/humidity, any device_update after a silence flag,
+or `/status` `lastUpdated` advancing past the flag time (`getDeviceLastUpdated`; its AGE is
+meaningless, only an advance counts). LAN units: three LAN commands the cloud never picks up
+log `[CLOUD LINK]` (Comfort app may not work), HomeKit untouched.
+Unverified: whether the cloud answers a status request for a cut-off adapter with its stale
+copy (then the silence signal never fires and unconfirmed commands are the signal).
+
 **Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
 regardless and does not propagate HAP error status. Confirm in the Home app, or by
 the asymmetry in the log: a write to an unreachable unit produces **no** `[CMD]` or

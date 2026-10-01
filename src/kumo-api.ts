@@ -125,6 +125,8 @@ export class KumoAPI {
   // Device profile and connection status
   private deviceProfiles: Map<string, DeviceProfile> = new Map();
   private deviceConnectionStatus: Map<string, boolean> = new Map();
+  // When each unit's last device_update arrived; see getLastDeviceUpdateAt.
+  private lastUpdateBySerial: Map<string, number> = new Map();
   // Re-asking the cloud about units marked offline; see recheckOfflineDevices.
   private static readonly OFFLINE_RECHECK_MS = 60000;
   private lastOfflineRecheck = 0;
@@ -797,6 +799,7 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
+        this.lastUpdateBySerial.set(deviceSerial, Date.now());
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -953,6 +956,24 @@ export class KumoAPI {
     );
     const mac = status?.mac;
     return typeof mac === 'string' && mac.length > 0 ? mac.toLowerCase() : null;
+  }
+
+  /** When the last `device_update` for this unit arrived (ms), or 0 if none yet. */
+  getLastDeviceUpdateAt(serial: string): number {
+    return this.lastUpdateBySerial.get(serial) ?? 0;
+  }
+
+  /**
+   * When the adapter last reported to the cloud, from `/devices/{serial}/status`.
+   * Only an ADVANCE is meaningful: healthy units can go 40+ hours without it moving,
+   * but it moved within a minute of the front bedroom's power cycle (2026-10-01).
+   */
+  async getDeviceLastUpdated(serial: string): Promise<number | null> {
+    const status = await this.makeAuthenticatedRequest<{ lastUpdated?: string }>(
+      `/devices/${serial}/status`,
+    );
+    const t = status?.lastUpdated ? Date.parse(status.lastUpdated) : NaN;
+    return Number.isFinite(t) ? t : null;
   }
 
   /** Ask the cloud to re-push a device's `adapter_update` (carries the password). */
