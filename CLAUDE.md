@@ -13,7 +13,10 @@ This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 AP
 ### Polling Strategy
 
 **Current behavior:** Intelligent adaptive polling
-- **With `disablePolling: true` (recommended):** Polling only activates when streaming fails
+- **With `disablePolling: true` (recommended):** Polling only activates when streaming fails.
+  Until 2.0 it never did: the fallback only restarted pollers that already existed, so it
+  logged "0 site poller(s) active" and nothing polled. `platform.ts:restartAllPollers` now
+  starts one for every site (`test/degraded-polling.test.js`).
 - **With `disablePolling: false` (default):** Polling runs continuously alongside streaming
 - Interval: 30 seconds in normal mode (configurable via `pollInterval`)
 - Degraded: 10 seconds when streaming fails (configurable via `degradedPollInterval`)
@@ -393,14 +396,17 @@ Comfort app said connected; fixed by a breaker power cycle). No device_status_v2
 For cloud-only units (`!hasLocalControl()`), `accessory.ts` "Cloud liveness" marks the unit
 unresponsive (`isReachable` false) on two unconfirmed cloud commands in a row
 (`watchForCloudConfirmation` path 'cloud'; a superseded command counts only if the cloud had
-already reported something else) or two unanswered status requests (`checkLiveness`, every
-5 min, asks only if no device_update for 5 min; `kumo-api.ts:getLastDeviceUpdateAt`). Clears
-on a late confirmation, a changed roomTemp/humidity, any device_update after a silence flag,
-or `/status` `lastUpdated` advancing past the flag time (`getDeviceLastUpdated`; its AGE is
-meaningless, only an advance counts). LAN units: three LAN commands the cloud never picks up
-log `[CLOUD LINK]` (Comfort app may not work), HomeKit untouched.
-Unverified: whether the cloud answers a status request for a cut-off adapter with its stale
-copy (then the silence signal never fires and unconfirmed commands are the signal).
+already reported something else). A command whose 60s watch spans a stream drop or reconnect
+doesn't count (`kumo-api.ts:streamInterruptedSince`, which also sees the planned reconnects a
+token refresh makes). Clears on a late confirmation, a changed roomTemp/humidity, or `/status`
+`lastUpdated` advancing past the flag time (`checkLiveness`, every 5 min while flagged;
+`getDeviceLastUpdated`; its AGE is meaningless, only an advance counts). LAN units: three LAN
+commands the cloud never picks up log `[CLOUD LINK]` (Comfort app may not work), HomeKit
+untouched; the same stream-drop rule applies.
+**Dropped 2026-10-06: unanswered status requests as a signal.** The first version also flagged
+two `force_adapter_request iuStatus` in a row with no device_update. A healthy front bedroom
+ignored about one in three, so it flagged 12 times in five days (each cleared within seconds)
+while taking commands normally. Don't bring it back without a much better answer rate.
 
 **Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
 regardless and does not propagate HAP error status. Confirm in the Home app, or by

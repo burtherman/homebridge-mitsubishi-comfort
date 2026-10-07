@@ -5,8 +5,9 @@
 // 10-01 on the front bedroom (cloud-only, no working LAN key): 8 commands from
 // HomeKit and the Comfort app were accepted and reported back as off, the Comfort app
 // said "connected", and a power cycle at the breaker fixed it. For cloud-only units,
-// two unconfirmed commands in a row, or two unanswered status requests in a row, now
-// show No Response until the unit reports in again.
+// two unconfirmed commands in a row now show No Response until the unit reports in
+// again. (Two unanswered status requests used to count too; dropped 2026-10-06 after
+// a healthy unit tripped it 3-4 times a day.)
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -27,14 +28,15 @@ function makeHarness({ local = null } = {}) {
   let stream = null;
   const sent = [];
   const kumoAPI = {
-    lastUpdateAt: 0,
     lastUpdated: null,
     asked: [],
+    streamDown: false,
+    streamUpSince: 0,
     subscribeToDevice(_s, cb) { stream = cb; },
     onDeviceProfileUpdate() {},
     sendCommand: async (_s, c) => { sent.push(c); return true; },
     requestDeviceStatus(serial) { this.asked.push(serial); },
-    getLastDeviceUpdateAt() { return this.lastUpdateAt; },
+    streamInterruptedSince(since) { return this.streamDown || this.streamUpSince >= since; },
     async getDeviceLastUpdated() { return this.lastUpdated; },
   };
   const platform = {
@@ -142,47 +144,43 @@ test('the adapter reporting to the cloud again clears it', async () => {
   assert.ok(handler.isReachable());
 });
 
-test('two unanswered status requests mark it No Response; an answer clears it', async () => {
-  const { handler, kumoAPI, update } = makeHarness();
-  kumoAPI.lastUpdateAt = Date.now() - 10 * 60 * 1000;   // quiet for 10 minutes
-  await handler.checkLiveness();                          // asks
-  assert.deepStrictEqual(kumoAPI.asked, [SERIAL]);
-  await sleep(2);
-  await handler.checkLiveness();                          // miss 1, asks again
-  await sleep(2);
+test('a quiet unit is never sent status requests', async () => {
+  const { handler, kumoAPI } = makeHarness();
+  await handler.checkLiveness();
+  await handler.checkLiveness();
+  await handler.checkLiveness();
+  assert.deepStrictEqual(kumoAPI.asked, []);
   assert.ok(handler.isReachable());
-  await handler.checkLiveness();                          // miss 2
+});
+
+test('a command whose answer could have come while the stream was down does not count', async () => {
+  const { handler, kumoAPI, logs } = makeHarness();
+  kumoAPI.streamDown = true;
+  await turnOn(handler); await sleep(30);
+  await turnOn(handler); await sleep(30);
+  assert.ok(handler.isReachable());
+  assert.ok(logs.info.some((m) => m.includes('stream dropped meanwhile')));
+
+  kumoAPI.streamDown = false;
+  kumoAPI.streamUpSince = Date.now() + 5;            // reconnects during the next watch
+  await turnOn(handler); await sleep(30);
+  assert.ok(!logs.warn.some((m) => m.includes('[CLOUD SYNC]')), 'a reconnect mid-watch does not count either');
+});
+
+test('an unconfirmed command before a stream drop still counts with one after it', async () => {
+  const { handler, kumoAPI } = makeHarness();
+  await turnOn(handler); await sleep(30);            // miss 1, stream fine
+  kumoAPI.streamDown = true;
+  await turnOn(handler); await sleep(30);            // stream down: not counted
+  kumoAPI.streamDown = false;
+  kumoAPI.streamUpSince = Date.now() - 1000;
+  await turnOn(handler); await sleep(30);            // miss 2
   assert.strictEqual(handler.isReachable(), false);
-
-  update({ roomTemp: 23.5 });                             // it answers
-  assert.ok(handler.isReachable());
 });
 
-test('a unit heard from recently is not asked', async () => {
-  const { handler, kumoAPI } = makeHarness();
-  kumoAPI.lastUpdateAt = Date.now() - 60000;
-  await handler.checkLiveness();
-  assert.deepStrictEqual(kumoAPI.asked, []);
-});
-
-test('an answered request resets the misses', async () => {
-  const { handler, kumoAPI } = makeHarness();
-  kumoAPI.lastUpdateAt = Date.now() - 10 * 60 * 1000;
-  await handler.checkLiveness();                          // asks
-  kumoAPI.lastUpdateAt = Date.now() + 1;                  // answered
-  await handler.checkLiveness();
-  assert.strictEqual(handler.probeMisses, 0);
-  assert.ok(handler.isReachable());
-});
-
-test('units on the LAN are never probed or marked No Response; the cloud link only gets a warning', async () => {
+test('units on the LAN are never marked No Response; the cloud link only gets a warning', async () => {
   const local = { calls: [], hasLocal: () => true, sendCommand(s, c) { this.calls.push(c); return Promise.resolve(true); } };
-  const { handler, kumoAPI, logs } = makeHarness({ local });
-  kumoAPI.lastUpdateAt = Date.now() - 10 * 60 * 1000;
-  await handler.checkLiveness();
-  await handler.checkLiveness();
-  await handler.checkLiveness();
-  assert.deepStrictEqual(kumoAPI.asked, []);
+  const { handler, logs } = makeHarness({ local });
 
   handler.CLOUD_SYNC_DELAY_MS = 1;
   for (let i = 0; i < 3; i += 1) {
@@ -192,4 +190,17 @@ test('units on the LAN are never probed or marked No Response; the cloud link on
   }
   assert.ok(handler.isReachable());
   assert.strictEqual(logs.warn.filter((m) => m.includes('[CLOUD LINK]') && m.includes('Comfort app')).length, 1);
+});
+
+test('LAN commands the cloud misses while the stream is down are not counted', async () => {
+  const local = { calls: [], hasLocal: () => true, sendCommand(s, c) { this.calls.push(c); return Promise.resolve(true); } };
+  const { handler, kumoAPI, logs } = makeHarness({ local });
+  kumoAPI.streamDown = true;
+  handler.CLOUD_SYNC_DELAY_MS = 1;
+  for (let i = 0; i < 3; i += 1) {
+    await turnOn(handler);
+    await handler.setActive(C.Active.INACTIVE);
+    await sleep(30);
+  }
+  assert.ok(!logs.warn.some((m) => m.includes('[CLOUD LINK]')));
 });

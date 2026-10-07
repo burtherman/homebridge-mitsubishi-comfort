@@ -1302,13 +1302,21 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Restart all site pollers with new interval
+   * (Re)start a poller for every site at the new interval. Covers sites with no
+   * poller yet: with `disablePolling` none is started at launch, and until 2.0 this
+   * only restarted existing ones, so the fallback logged "0 site poller(s) active"
+   * and nothing polled while the stream was down (seen 2026-10-01).
    */
   private restartAllPollers(intervalMs: number): void {
     const intervalSec = intervalMs / 1000;
+    const siteIds = new Set([...this.sitePollers.keys(), ...this.accessoryHandlers.map(h => h.getSiteId())]);
 
-    for (const [siteId, timer] of this.sitePollers) {
-      clearInterval(timer);
+    for (const siteId of siteIds) {
+      const timer = this.sitePollers.get(siteId);
+      if (timer) {
+        clearInterval(timer);
+      }
+      this.siteAccessories.set(siteId, this.accessoryHandlers.filter(h => h.getSiteId() === siteId));
 
       // Do immediate poll
       this.pollSite(siteId);

@@ -125,8 +125,8 @@ export class KumoAPI {
   // Device profile and connection status
   private deviceProfiles: Map<string, DeviceProfile> = new Map();
   private deviceConnectionStatus: Map<string, boolean> = new Map();
-  // When each unit's last device_update arrived; see getLastDeviceUpdateAt.
-  private lastUpdateBySerial: Map<string, number> = new Map();
+  // When the socket last (re)connected; see streamInterruptedSince.
+  private streamUpSince = 0;
   // Re-asking the cloud about units marked offline; see recheckOfflineDevices.
   private static readonly OFFLINE_RECHECK_MS = 60000;
   private lastOfflineRecheck = 0;
@@ -745,6 +745,7 @@ export class KumoAPI {
         }
 
         // Mark as healthy and start health checks
+        this.streamUpSince = Date.now();
         this.isStreamingHealthy = true;
         this.notifyHealthChange(false, true);
         this.startHealthChecks();
@@ -799,7 +800,6 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
-        this.lastUpdateBySerial.set(deviceSerial, Date.now());
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -958,9 +958,14 @@ export class KumoAPI {
     return typeof mac === 'string' && mac.length > 0 ? mac.toLowerCase() : null;
   }
 
-  /** When the last `device_update` for this unit arrived (ms), or 0 if none yet. */
-  getLastDeviceUpdateAt(serial: string): number {
-    return this.lastUpdateBySerial.get(serial) ?? 0;
+  /**
+   * Whether the stream is down now, or reconnected at or after `since` (ms). Either
+   * way, a device_update sent in that span may never have arrived. Counts every
+   * reconnect, including the planned ones a token refresh makes (those don't change
+   * the reported health).
+   */
+  streamInterruptedSince(since: number): boolean {
+    return !this.socket?.connected || this.streamUpSince >= since;
   }
 
   /**

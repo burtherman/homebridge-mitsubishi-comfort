@@ -172,14 +172,10 @@ export class KumoThermostatAccessory {
   // Liveness of the unit's link to the cloud; see the "Cloud liveness" section.
   private readonly LIVENESS_CHECK_MS = 5 * 60 * 1000;
   private livenessTimer: NodeJS.Timeout | null = null;
-  private probeSentAt = 0;
-  private probeMisses = 0;
   private unconfirmedCloudCommands = 0;
   private lanSyncMisses = 0;
   private lanSyncWarned = false;
-  private unresponsive: {
-    by: 'commands' | 'silence'; at: number; roomTemp?: number; humidity?: number | null; expect?: string;
-  } | null = null;
+  private unresponsive: { at: number; roomTemp?: number; humidity?: number | null; expect?: string } | null = null;
   private lastUnconfirmedLabel: string | undefined;
   // TEMPORARY (2.0 soak): log every cloud update for a minute after a LAN command;
   // see logCloudWatch. Remove once the Comfort app "warming" question is settled.
@@ -876,7 +872,7 @@ export class KumoThermostatAccessory {
 
     this.logCloudWatch(data as Record<string, unknown>, 'streaming');
     this.noteCloudSync(data);
-    this.noteCloudFreshness(data, 'streaming');
+    this.noteCloudFreshness(data);
 
     // Use existing update processing logic
     this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
@@ -1122,7 +1118,7 @@ export class KumoThermostatAccessory {
       this.applyZoneSensors(zone.adapter);
       this.logCloudWatch(zone.adapter as unknown as Record<string, unknown>, 'polling');
       this.noteCloudSync(zone.adapter);
-      this.noteCloudFreshness(zone.adapter, 'polling');
+      this.noteCloudFreshness(zone.adapter);
     }
     this.processZoneUpdate(zone, 'polling', updateTimestamp);
   }
@@ -1374,6 +1370,14 @@ export class KumoThermostatAccessory {
         return;
       }
       this.cloudSyncPending = null;
+      if (this.streamInterruptedSince(sentAt)) {
+        // The cloud's answer may have been sent while the stream was down.
+        this.platform.log.info(
+          `[CLOUD SYNC] ${this.accessory.displayName}: no word of ${label} after the ` +
+          `${path === 'local' ? 'LAN' : 'cloud'} command, but the cloud stream dropped meanwhile, so it doesn't count`,
+        );
+        return;
+      }
       if (path === 'local') {
         this.platform.log.info(
           `[CLOUD SYNC] ${this.accessory.displayName}: the cloud still doesn't report ${label} ` +
@@ -1443,11 +1447,16 @@ export class KumoThermostatAccessory {
   // 2026-09-30/10-01 on the front bedroom (cloud-only, no working LAN key): 8
   // commands from HomeKit and the Comfort app were accepted and then reported back
   // as off; a power cycle at the breaker fixed it. For units the plugin reaches only
-  // through the cloud, two signals mark the unit No Response:
-  //  - two commands in a row the cloud never reports taking effect, or
-  //  - two status requests in a row with no device_update at all.
+  // through the cloud, two commands in a row the cloud never reports taking effect
+  // mark the unit No Response. A command whose watch spans a stream drop doesn't
+  // count: the answer may have been sent while the socket was down.
   // Units on the LAN are read directly, so for them a dead cloud link only gets a
   // log warning (the Comfort app may not work; HomeKit does).
+  //
+  // Dropped 2026-10-06: also marking it after two unanswered status requests. A
+  // healthy front bedroom ignored about one request in three, so two in a row came
+  // up 3-4 times a day (12 false No Responses in five days, each cleared within
+  // seconds, while the unit took commands normally).
 
   private cloudCommandUnconfirmed(label: string): void {
     this.unconfirmedCloudCommands += 1;
@@ -1457,7 +1466,7 @@ export class KumoThermostatAccessory {
       `(${this.unconfirmedCloudCommands} in a row); it may not have reached the unit`,
     );
     if (this.unconfirmedCloudCommands >= 2) {
-      this.markUnresponsive('commands', 'its last two commands never took effect');
+      this.markUnresponsive('its last two commands never took effect');
     }
   }
 
@@ -1472,14 +1481,14 @@ export class KumoThermostatAccessory {
     }
   }
 
-  private markUnresponsive(by: 'commands' | 'silence', reason: string): void {
+  private markUnresponsive(reason: string): void {
     if (this.unresponsive || this.hasLocalControl()) {
       return;
     }
     const wasReachable = this.isReachable();
     this.unresponsive = {
-      by, at: Date.now(), roomTemp: this.currentStatus?.roomTemp, humidity: this.currentStatus?.humidity ?? null,
-      expect: by === 'commands' ? this.lastUnconfirmedLabel : undefined,
+      at: Date.now(), roomTemp: this.currentStatus?.roomTemp, humidity: this.currentStatus?.humidity ?? null,
+      expect: this.lastUnconfirmedLabel,
     };
     this.platform.log.warn(
       `[REACHABILITY] ${this.accessory.displayName}: not responding — ${reason}. The cloud still lists it as ` +
@@ -1498,8 +1507,6 @@ export class KumoThermostatAccessory {
     this.unresponsive = null;
     this.unconfirmedCloudCommands = 0;
     this.lastUnconfirmedLabel = undefined;
-    this.probeMisses = 0;
-    this.probeSentAt = 0;
     this.platform.log.info(`[REACHABILITY] ${this.accessory.displayName}: responding again (${how})`);
     if (this.isReachable()) {
       this.pushCurrentState();
@@ -1507,21 +1514,16 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * A cloud update for a unit marked unresponsive. After silence, any device_update
-   * is the unit answering. After unconfirmed commands, an update alone proves
-   * nothing (the cloud sent the front bedroom updates while it was cut off), so it
-   * takes a changed reading: a cut-off unit's room temperature and humidity freeze.
+   * A cloud update for a unit marked unresponsive. An update alone proves nothing
+   * (the cloud sent the front bedroom updates while it was cut off), so it takes a
+   * late confirmation of the last command or a changed reading: a cut-off unit's
+   * room temperature and humidity freeze.
    */
   private noteCloudFreshness(
     data: { roomTemp?: number; humidity?: number | null; power?: number; operationMode?: string },
-    source: 'streaming' | 'polling',
   ): void {
     const u = this.unresponsive;
     if (!u) {
-      return;
-    }
-    if (u.by === 'silence' && source === 'streaming') {
-      this.clearUnresponsive('it answered a status request');
       return;
     }
     // A late confirmation: the last command did take effect, just slowly.
@@ -1536,60 +1538,32 @@ export class KumoThermostatAccessory {
     }
   }
 
-  /** Run every LIVENESS_CHECK_MS for units reached only through the cloud. */
+  /** Whether the cloud stream is down now or dropped since `since`; see kumo-api. */
+  private streamInterruptedSince(since: number): boolean {
+    const api = this.kumoAPI as unknown as { streamInterruptedSince?: (since: number) => boolean };
+    return typeof api.streamInterruptedSince === 'function' && api.streamInterruptedSince(since);
+  }
+
+  /**
+   * Run every LIVENESS_CHECK_MS. For a unit marked unresponsive: clear it if the
+   * adapter's own report time moved past when it was marked, otherwise nudge it.
+   */
   private async checkLiveness(): Promise<void> {
-    if (this.hasLocalControl() || this.cloudConnected === false) {
-      this.probeSentAt = 0;
-      this.probeMisses = 0;
+    if (!this.unresponsive || this.hasLocalControl() || this.cloudConnected === false) {
       return;
     }
     const api = this.kumoAPI as unknown as {
       requestDeviceStatus?: (serial: string) => void;
-      getLastDeviceUpdateAt?: (serial: string) => number;
       getDeviceLastUpdated?: (serial: string) => Promise<number | null>;
     };
-    if (typeof api.requestDeviceStatus !== 'function' || typeof api.getLastDeviceUpdateAt !== 'function') {
+    // Its age means nothing, but an advance does; see getDeviceLastUpdated.
+    const reported = typeof api.getDeviceLastUpdated === 'function'
+      ? await api.getDeviceLastUpdated(this.deviceSerial) : null;
+    if (this.unresponsive && reported !== null && reported > this.unresponsive.at) {
+      this.clearUnresponsive('it reported to the cloud again');
       return;
     }
-
-    if (this.unresponsive) {
-      // The adapter's own report time moved past when it was marked: it's back.
-      // (Its age means nothing, but an advance does; see getDeviceLastUpdated.)
-      const reported = typeof api.getDeviceLastUpdated === 'function'
-        ? await api.getDeviceLastUpdated(this.deviceSerial) : null;
-      if (reported !== null && reported > this.unresponsive.at) {
-        this.clearUnresponsive('it reported to the cloud again');
-        return;
-      }
-      api.requestDeviceStatus(this.deviceSerial);
-      return;
-    }
-
-    const last = api.getLastDeviceUpdateAt(this.deviceSerial);
-    if (this.probeSentAt) {
-      if (last >= this.probeSentAt) {
-        this.probeMisses = 0;
-      } else {
-        this.probeMisses += 1;
-        this.platform.log.info(
-          `[CLOUD LINK] ${this.accessory.displayName}: no answer to a status request (${this.probeMisses} in a row)`,
-        );
-        if (this.probeMisses >= 2) {
-          this.probeSentAt = 0;
-          this.markUnresponsive('silence', 'it hasn\'t answered two status requests in a row');
-          return;
-        }
-      }
-      this.probeSentAt = 0;
-    }
-    // A unit heard from recently needs no request; the 5-minute stream check often
-    // already asked every unit.
-    if (Date.now() - last < this.LIVENESS_CHECK_MS) {
-      this.probeMisses = 0;
-      return;
-    }
-    this.probeSentAt = Date.now();
-    api.requestDeviceStatus(this.deviceSerial);
+    api.requestDeviceStatus?.(this.deviceSerial);
   }
 
   private processZoneUpdate(zone: Zone, source: 'streaming' | 'polling' | 'local', timestamp: number) {
