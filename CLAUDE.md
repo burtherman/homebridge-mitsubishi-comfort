@@ -403,10 +403,24 @@ token refresh makes). Clears on a late confirmation, a changed roomTemp/humidity
 `getDeviceLastUpdated`; its AGE is meaningless, only an advance counts). LAN units: three LAN
 commands the cloud never picks up log `[CLOUD LINK]` (Comfort app may not work), HomeKit
 untouched; the same stream-drop rule applies.
+**A command for what the cloud already reports is not watched** (`lastCloudLabel`, set in
+`noteCloudSync`): the cloud sends nothing when nothing changed, so the daily all-off hitting
+off units counted a miss each time (false `[CLOUD LINK]` 2026-10-08 and 10-10).
 **Dropped 2026-10-06: unanswered status requests as a signal.** The first version also flagged
 two `force_adapter_request iuStatus` in a row with no device_update. A healthy front bedroom
 ignored about one in three, so it flagged 12 times in five days (each cleared within seconds)
 while taking commands normally. Don't bring it back without a much better answer rate.
+
+**Zombie-stream check verifies before reconnecting (2.0).** `kumo-api.ts:checkStreamingLiveness`
+nudges every unit after 5 quiet minutes. Idle, off units often don't answer (the same
+behaviour as above), so "no answer in 2.5 min" reconnected 12-21 times a day from 2026-10-04.
+Now an unanswered nudge runs `streamMissedSomething`: `GET /sites/{id}/zones` (quiet, no debug
+dump) compared with the last `device_update` per unit (`streamState`; power, operationMode,
+spHeat, spCool, roomTemp). Equal → no reconnect, `lastStreamVerifiedTs` restarts the 5 min.
+Different, unreadable, timed out (20s) or no site known → reconnect, and the warning says which
+field differed. In debug mode the "nothing was missed" outcome logs at info (contains "zombie",
+so the Pi's `kumo-resilience-watch.log` keeps it). If `roomTemp` turns out to differ routinely
+(the cloud refreshing its copy without pushing), drop it from `STREAM_COMPARE_FIELDS`.
 
 **Link watch (TEMPORARY, 2.0 soak, debug mode only).** The command signal can't see a dropout
 when nobody sends a HomeKit command: 2026-10-11 the front bedroom's cloud copy said fan-on from

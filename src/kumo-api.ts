@@ -109,6 +109,10 @@ export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<Device
 export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
 export type DeviceConnectionCallback = (deviceSerial: string, connected: boolean) => void;
 
+/** The device_update fields the zombie check compares with the cloud's REST copy. */
+const STREAM_COMPARE_FIELDS = ['power', 'operationMode', 'spHeat', 'spCool', 'roomTemp'] as const;
+type StreamSnapshot = Partial<Record<typeof STREAM_COMPARE_FIELDS[number], number | string>>;
+
 export class KumoAPI {
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
@@ -161,6 +165,13 @@ export class KumoAPI {
   private probeBaselineDeviceTs: number = 0;  // lastDeviceUpdateTs captured at nudge time
   private lastZombieReconnectTs: number = 0;
   private forceStatusOnNextConnect: boolean = false;
+  // What the stream last delivered per unit, and the sites seen, so an unanswered
+  // nudge can be checked against the cloud's own copy; see streamMissedSomething.
+  private streamState: Map<string, StreamSnapshot> = new Map();
+  private knownSiteIds: Set<string> = new Set();
+  private lastStreamVerifiedTs: number = 0;
+  private zombieCheckRunning: boolean = false;
+  private static readonly ZOMBIE_VERIFY_TIMEOUT_MS = 20000;
   private static readonly PROBE_AFTER_MS = 300000;   // 5 min of device_update silence → nudge for status
   private static readonly PROBE_GRACE_MS = 150000;    // 2.5 min for ANY device to answer the nudge (adapters: 6–65s)
   private static readonly ZOMBIE_RECONNECT_COOLDOWN_MS = 300000; // ≥5 min between zombie reconnects
@@ -575,7 +586,8 @@ export class KumoAPI {
     return sites || [];
   }
 
-  async getZones(siteId: string): Promise<Zone[]> {
+  async getZones(siteId: string, opts: { quiet?: boolean } = {}): Promise<Zone[]> {
+    const verbose = this.debugMode && !opts.quiet;
     // Ensure we have a valid token
     const authenticated = await this.ensureAuthenticated();
     if (!authenticated) {
@@ -587,7 +599,7 @@ export class KumoAPI {
       const endpoint = `/sites/${siteId}/zones`;
 
       // Debug logging: Show request details
-      if (this.debugMode) {
+      if (verbose) {
         this.log.info(`→ API Request: GET ${endpoint}`);
       }
 
@@ -606,7 +618,7 @@ export class KumoAPI {
       const zones = await response.json() as Zone[];
 
       // Debug logging: Show response details
-      if (this.debugMode) {
+      if (verbose) {
         this.log.info(`← API Response: 200 (${duration}ms)`);
         this.log.info(`  Fetched ${zones.length} zone(s) for site ${siteId}`);
 
@@ -628,6 +640,7 @@ export class KumoAPI {
         });
       }
 
+      this.knownSiteIds.add(siteId);
       return zones;
     } catch (error) {
       if (error instanceof Error) {
@@ -800,6 +813,7 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
+        this.noteStreamState(deviceSerial, data);
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -1177,7 +1191,15 @@ export class KumoAPI {
    *   quiet < PROBE_AFTER_MS ............... healthy, do nothing
    *   quiet ≥ PROBE_AFTER_MS, no probe yet . send one iuStatus nudge to all devices
    *   probe pending, a device_update landed  healthy (idle, not zombie) — clear probe
-   *   probe pending > PROBE_GRACE_MS, silent zombie confirmed → reconnect (forceStatus)
+   *   probe pending > PROBE_GRACE_MS, silent check the cloud's own copy (below)
+   *
+   * An unanswered nudge is NOT proof of a zombie (2.0). With every unit off and idle
+   * the adapters often don't answer one: 12-21 needless reconnects a day from
+   * 2026-10-04 on. So when the grace runs out, the cloud's REST copy of each unit is
+   * compared with what the stream last delivered (streamMissedSomething). A difference
+   * means the stream missed an update: reconnect. No difference means there was
+   * nothing to deliver: leave the socket alone and start the quiet clock again. If the
+   * copy can't be read, or no site is known yet, it reconnects as before.
    *
    * This is deliberately NOT the removed probe: that one declared a zombie if a nudge
    * went unanswered within 20s and false-fired on adapters that answer in 6–65s. Here
@@ -1202,8 +1224,8 @@ export class KumoAPI {
     }
 
     const deviceStale = now - this.lastDeviceUpdateTs;
-    if (deviceStale < KumoAPI.PROBE_AFTER_MS) {
-      this.probePendingSince = 0; // device_update flowing on its own
+    if (now - Math.max(this.lastDeviceUpdateTs, this.lastStreamVerifiedTs) < KumoAPI.PROBE_AFTER_MS) {
+      this.probePendingSince = 0; // device_update flowing on its own, or just checked
       return;
     }
 
@@ -1224,15 +1246,99 @@ export class KumoAPI {
       return;
     }
 
-    // Grace elapsed and NO device answered the nudge → zombie. Reconnect.
+    // Grace elapsed and NO device answered the nudge. Idle or zombie? Ask the cloud.
     this.probePendingSince = 0;
-    this.lastZombieReconnectTs = now;
+    const quiet = `no device_update for ${Math.round(deviceStale / 1000)}s and a status nudge went unanswered`;
+    if (this.knownSiteIds.size === 0) {
+      this.reconnectZombie(`${quiet} — forcing reconnect`);
+      return;
+    }
+    if (this.zombieCheckRunning) {
+      return;
+    }
+    this.zombieCheckRunning = true;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve('the cloud\'s copy couldn\'t be read in time'), KumoAPI.ZOMBIE_VERIFY_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    Promise.race([this.streamMissedSomething(), timedOut])
+      .catch((e: unknown) => `the cloud's copy couldn't be read (${e instanceof Error ? e.message : String(e)})`)
+      .then((missed) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        this.zombieCheckRunning = false;
+        if (missed === null) {
+          this.lastStreamVerifiedTs = Date.now();
+          // Visible in debug mode during the 2.0 soak, to see how often this saves a reconnect.
+          (this.debugMode ? this.log.info : this.log.debug).call(
+            this.log, `Streaming zombie check: ${quiet}, but the cloud's copy matches the stream — nothing was missed, not reconnecting`);
+          return;
+        }
+        if (this.isReconnecting || !this.isStreamingConnected()) {
+          return; // it dropped or is reconnecting meanwhile; nothing to force
+        }
+        this.reconnectZombie(`${quiet}, and ${missed} — forcing reconnect`);
+      });
+  }
+
+  private reconnectZombie(why: string): void {
+    this.lastZombieReconnectTs = Date.now();
     this.forceStatusOnNextConnect = true;
-    this.log.warn(
-      `⚠ Streaming zombie: no device_update for ${Math.round(deviceStale / 1000)}s and a status nudge went unanswered — forcing reconnect`,
-    );
+    this.log.warn(`⚠ Streaming zombie: ${why}`);
     this.reconnectStreaming().catch(e =>
       this.log.warn(`Zombie reconnect failed: ${(e as Error).message}`));
+  }
+
+  /** Keep the fields of a device_update that the zombie check compares. */
+  private noteStreamState(serial: string, data: Record<string, unknown>): void {
+    const snap = this.streamState.get(serial) ?? {};
+    for (const key of STREAM_COMPARE_FIELDS) {
+      const value = data[key];
+      if (typeof value === 'number' || typeof value === 'string') {
+        (snap as Record<string, number | string>)[key] = value;
+      }
+    }
+    this.streamState.set(serial, snap);
+  }
+
+  /**
+   * Compare the cloud's REST copy of every unit with what the stream last delivered.
+   * Returns null when they agree (the stream missed nothing), or a short description
+   * of the first difference or of why the comparison couldn't be made.
+   */
+  private async streamMissedSomething(): Promise<string | null> {
+    let compared = 0;
+    for (const siteId of this.knownSiteIds) {
+      const zones = await this.getZones(siteId, { quiet: true });
+      if (zones.length === 0) {
+        return 'the cloud\'s copy couldn\'t be read';
+      }
+      for (const zone of zones) {
+        const adapter = zone.adapter as unknown as Record<string, unknown> | undefined;
+        const serial = adapter?.deviceSerial as string | undefined;
+        const seen = serial ? this.streamState.get(serial) : undefined;
+        if (!adapter || !serial || !seen || !this.deviceUpdateCallbacks.has(serial)) {
+          continue;
+        }
+        for (const key of STREAM_COMPARE_FIELDS) {
+          const cloud = adapter[key];
+          const stream = (seen as Record<string, number | string | undefined>)[key];
+          if (stream === undefined || cloud === undefined || cloud === null) {
+            continue;
+          }
+          compared += 1;
+          const same = typeof cloud === 'number' && typeof stream === 'number'
+            ? Math.abs(cloud - stream) < 0.05
+            : cloud === stream;
+          if (!same) {
+            return `the cloud has ${key}=${String(cloud)} for ${zone.name || serial} where the stream last sent ${String(stream)}`;
+          }
+        }
+      }
+    }
+    return compared > 0 ? null : 'there was nothing to compare the cloud\'s copy with';
   }
 
   /** Ask every subscribed device to re-report indoor-unit status (→ device_update). */

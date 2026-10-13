@@ -180,6 +180,8 @@ export class KumoThermostatAccessory {
   private lanSyncWarned = false;
   private unresponsive: { at: number; roomTemp?: number; humidity?: number | null; expect?: string } | null = null;
   private lastUnconfirmedLabel: string | undefined;
+  // The power/mode the cloud last reported; see watchForCloudConfirmation.
+  private lastCloudLabel: string | undefined;
   // TEMPORARY (2.0 soak): log every cloud update for a minute after a LAN command;
   // see logCloudWatch. Remove once the Comfort app "warming" question is settled.
   private cloudWatchFrom = 0;
@@ -1381,6 +1383,13 @@ export class KumoThermostatAccessory {
         this.cloudCommandUnconfirmed(prev.label);
       }
     }
+    // The cloud already says this (an all-off hitting a unit that's off): it sends
+    // nothing when nothing changed, so there is nothing to wait for. Waiting counted
+    // a miss each time and raised false [CLOUD LINK] warnings (2026-10-08, 10-10).
+    if (label === this.lastCloudLabel) {
+      this.cloudSyncPending = null;
+      return;
+    }
     const sentAt = Date.now();
     const timeout = setTimeout(() => {
       if (this.cloudSyncPending?.sentAt !== sentAt) {
@@ -1431,6 +1440,10 @@ export class KumoThermostatAccessory {
 
   /** Log once when a cloud update matches the power/mode of the last LAN command. */
   private noteCloudSync(data: { power?: number; operationMode?: string }): void {
+    const cloudLabel = syncLabel(data);
+    if (cloudLabel !== 'unknown') {
+      this.lastCloudLabel = cloudLabel;
+    }
     const pending = this.cloudSyncPending;
     if (!pending) {
       return;

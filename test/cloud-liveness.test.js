@@ -185,7 +185,6 @@ test('units on the LAN are never marked No Response; the cloud link only gets a 
   handler.CLOUD_SYNC_DELAY_MS = 1;
   for (let i = 0; i < 3; i += 1) {
     await turnOn(handler);
-    await handler.setActive(C.Active.INACTIVE);
     await sleep(30);
   }
   assert.ok(handler.isReachable());
@@ -199,8 +198,58 @@ test('LAN commands the cloud misses while the stream is down are not counted', a
   handler.CLOUD_SYNC_DELAY_MS = 1;
   for (let i = 0; i < 3; i += 1) {
     await turnOn(handler);
-    await handler.setActive(C.Active.INACTIVE);
     await sleep(30);
   }
   assert.ok(!logs.warn.some((m) => m.includes('[CLOUD LINK]')));
+});
+
+// ---- commands that change nothing ------------------------------------------
+//
+// The daily all-off sends "off" to units that are already off. The cloud sends
+// nothing when nothing changed, so waiting for it to "confirm" counted a miss every
+// time: false [CLOUD LINK] warnings on the living room (2026-10-08) and the middle
+// bedroom (2026-10-10), and on a cloud-only unit two in a row would have shown No
+// Response.
+
+test('an off sent to a cloud-only unit the cloud already reports off is not waited on', async () => {
+  const { handler, sent, logs } = makeHarness();
+  await handler.setActive(C.Active.INACTIVE); await sleep(30);
+  await handler.setActive(C.Active.INACTIVE); await sleep(30);
+  await handler.setActive(C.Active.INACTIVE); await sleep(30);
+  assert.strictEqual(sent.length, 3, 'the commands still go out');
+  assert.ok(handler.isReachable());
+  assert.ok(!logs.warn.some((m) => m.includes('[CLOUD SYNC]')), 'no miss counted');
+});
+
+test('an off sent to a LAN unit the cloud already reports off raises no cloud-link warning', async () => {
+  const local = { calls: [], hasLocal: () => true, sendCommand(s, c) { this.calls.push(c); return Promise.resolve(true); } };
+  const { handler, logs } = makeHarness({ local });
+  handler.CLOUD_SYNC_DELAY_MS = 1;
+  for (let i = 0; i < 4; i += 1) {
+    await handler.setActive(C.Active.INACTIVE);
+    await sleep(30);
+  }
+  assert.strictEqual(local.calls.length, 4);
+  assert.ok(!logs.warn.some((m) => m.includes('[CLOUD LINK]')));
+  assert.ok(!logs.info.some((m) => m.includes('still doesn')), 'nothing was waited on');
+});
+
+test('a command back to what the cloud reports cancels the wait for the one before it', async () => {
+  const { handler, logs } = makeHarness();
+  await turnOn(handler);                             // waiting for the cloud to say cool
+  await handler.setActive(C.Active.INACTIVE);        // back to off, which the cloud still says
+  await sleep(30);
+  assert.ok(!logs.warn.some((m) => m.includes('[CLOUD SYNC]')), 'the abandoned cool is not a miss');
+  assert.ok(handler.isReachable());
+});
+
+test('a real change is still waited on once the cloud has caught up with the last one', async () => {
+  const { handler, update, logs } = makeHarness();
+  handler.CLOUD_SYNC_WATCH_MS = 1000;
+  await turnOn(handler);
+  update({ power: 1, operationMode: 'cool' });       // confirmed; the cloud now says cool
+  handler.CLOUD_SYNC_WATCH_MS = 15;
+  await handler.setActive(C.Active.INACTIVE);        // off is a change again
+  await sleep(30);
+  assert.ok(logs.warn.some((m) => m.includes('never reported off')), 'an unconfirmed off counts');
 });
