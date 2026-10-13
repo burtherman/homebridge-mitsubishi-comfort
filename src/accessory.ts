@@ -6,6 +6,7 @@ import {
   FanSpeed, FAN_SPEEDS, normalizeFanSpeed, VaneDirection, isVaneDirection,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
+import type { LinkWatchTarget } from './link-watch';
 
 // HeaterCooler implementation (2.0): portions derived from
 // homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0, src/accessory.ts @ 83dfd18),
@@ -169,6 +170,8 @@ export class KumoThermostatAccessory {
   private cloudSyncPending: {
     label: string; sentAt: number; timeout: NodeJS.Timeout; path: 'local' | 'cloud'; contradicted: boolean;
   } | null = null;
+  // When the last streaming device_update arrived; read by the temporary link watch.
+  private lastCloudUpdateAt = 0;
   // Liveness of the unit's link to the cloud; see the "Cloud liveness" section.
   private readonly LIVENESS_CHECK_MS = 5 * 60 * 1000;
   private livenessTimer: NodeJS.Timeout | null = null;
@@ -870,6 +873,7 @@ export class KumoThermostatAccessory {
       },
     } as Zone;
 
+    this.lastCloudUpdateAt = Date.now();
     this.logCloudWatch(data as Record<string, unknown>, 'streaming');
     this.noteCloudSync(data);
     this.noteCloudFreshness(data);
@@ -928,6 +932,19 @@ export class KumoThermostatAccessory {
         this.platform.log.error('Status listener error:', err);
       }
     }
+  }
+
+  /** TEMPORARY (2.0 soak): what the link watch records about this unit; see link-watch.ts. */
+  public getLinkWatchInfo(): LinkWatchTarget {
+    return {
+      serial: this.deviceSerial,
+      name: this.accessory.displayName,
+      cloudOnly: !this.hasLocalControl(),
+      lastCloudUpdateAt: this.lastCloudUpdateAt,
+      roomTemp: this.currentStatus?.roomTemp,
+      mode: this.currentStatus ? (this.currentStatus.power === 0 ? 'off' : this.currentStatus.operationMode) : undefined,
+      reachable: this.isReachable(),
+    };
   }
 
   // Getter methods for platform to access private properties

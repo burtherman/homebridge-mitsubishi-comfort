@@ -408,6 +408,18 @@ two `force_adapter_request iuStatus` in a row with no device_update. A healthy f
 ignored about one in three, so it flagged 12 times in five days (each cleared within seconds)
 while taking commands normally. Don't bring it back without a much better answer rate.
 
+**Link watch (TEMPORARY, 2.0 soak, debug mode only).** The command signal can't see a dropout
+when nobody sends a HomeKit command: 2026-10-11 the front bedroom's cloud copy said fan-on from
+05:26 to 20:14 (its `/status` `lastUpdated` advanced at 20:14:59, the same second the state
+flipped) and nothing was flagged. `src/link-watch.ts` (`platform.ts:startLinkWatch`) samples
+each cloud-only unit every 5 min: last `iuStatus` request answered or not, cloud roomTemp and
+minutes unchanged, whether a Kumo adapter answers at its LAN address (`linkWatchLanProbe`;
+a made-up key is fine, a rejection is an answer), and `lastUpdated`. Samples go to
+`mitsubishi-comfort-link-watch.log` in the storage dir (local time, rolls at 1 MB to `.1`);
+the Homebridge log gets `[LINK WATCH]` only on a LAN change, a cloud check-in or 6 unanswered
+in a row. Never touches HomeKit. **After the next dropout, read that file around it, build
+the real check on whichever signal moved, then delete the watch** (with `[CLOUD WATCH]`).
+
 **Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
 regardless and does not propagate HAP error status. Confirm in the Home app, or by
 the asymmetry in the log: a write to an unreachable unit produces **no** `[CMD]` or
