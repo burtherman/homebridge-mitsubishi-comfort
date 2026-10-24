@@ -448,17 +448,16 @@ field differed. In debug mode the "nothing was missed" outcome logs at info (con
 so the Pi's `kumo-resilience-watch.log` keeps it). If `roomTemp` turns out to differ routinely
 (the cloud refreshing its copy without pushing), drop it from `STREAM_COMPARE_FIELDS`.
 
-**Link watch (TEMPORARY, 2.0 soak, debug mode only).** The command signal can't see a dropout
-when nobody sends a HomeKit command: 2026-10-11 the front bedroom's cloud copy said fan-on from
-05:26 to 20:14 (its `/status` `lastUpdated` advanced at 20:14:59, the same second the state
-flipped) and nothing was flagged. `src/link-watch.ts` (`platform.ts:startLinkWatch`) samples
-each cloud-only unit every 5 min: last `iuStatus` request answered or not, cloud roomTemp and
-minutes unchanged, whether a Kumo adapter answers at its LAN address (`linkWatchLanProbe`;
-a made-up key is fine, a rejection is an answer), and `lastUpdated`. Samples go to
-`mitsubishi-comfort-link-watch.log` in the storage dir (local time, rolls at 1 MB to `.1`);
-the Homebridge log gets `[LINK WATCH]` only on a LAN change, a cloud check-in or 6 unanswered
-in a row. Never touches HomeKit. **After the next dropout, read that file around it, build
-the real check on whichever signal moved, then delete the watch** (with `[CLOUD WATCH]`).
+**Link watch (removed 2026-10-24).** After the 2026-10-11 dropout (front bedroom's cloud copy
+said fan-on 05:26-20:14 and nothing was flagged, since no HomeKit command was sent), a
+debug-only watch sampled each cloud-only unit every 5 min: iuStatus answered or not, cloud
+roomTemp unchanged minutes, LAN answer at its address, `/status` `lastUpdated`. 12 days, 3,155
+samples (`docs/link-watch-front-bedroom-2026-10-12-to-24.log.gz`): no repeat of 10-11 (at most
+3 unanswered requests in a row, roomTemp never unchanged past 530 min, `lastUpdated` advanced 6
+times). One real outage, 2026-10-23 21:29-21:36: the LAN probe went silent ~2 min before the
+cloud's device_status_v2 offline, which the existing No Response path handled. Removed with
+`[CLOUD WATCH]` because the only watched unit (front bedroom) is leaving cloud-only control
+(adapter swap or a Serin). If a silent dropout recurs, the archived samples are the baseline.
 
 **Verifying:** config-ui-x is useless for this — `/api/accessories` returns HTTP 200
 regardless and does not propagate HAP error status. Confirm in the Home app, or by

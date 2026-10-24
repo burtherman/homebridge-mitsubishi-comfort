@@ -324,24 +324,6 @@ test('the log says when the cloud catches up with a LAN command', async () => {
   assert.match(synced[0], /the cloud now reports cool/);
 });
 
-test('TEMPORARY: cloud updates are logged for a minute after a LAN command, not otherwise', async () => {
-  const local = makeLocalClient();
-  const { handler, kumoAPI, platform } = makeHarness({ localClient: local });
-  kumoAPI.requestDeviceStatus = () => {};
-  handler.CLOUD_SYNC_DELAY_MS = 5;
-  const infos = [];
-  platform.log = { ...platform.log, info: (m) => infos.push(m) };
-  handler.updateFromZone(cloudZone({ operationMode: 'heat' }));
-  assert.strictEqual(infos.filter((m) => m.includes('[CLOUD WATCH]')).length, 0, 'nothing before a LAN command');
-
-  await handler.setActive(Characteristic.Active.INACTIVE);
-  await sleep(20);
-  handler.updateFromZone(cloudZone({ operationMode: 'heat' }));
-  const watched = infos.filter((m) => m.includes('[CLOUD WATCH]'));
-  assert.strictEqual(watched.length, 1);
-  assert.match(watched[0], /via polling: power=1 mode=heat/);
-});
-
 // ---- a humidity tile on a unit that lost its sensor (2026-09-28) -------------
 //
 // The sensor moved from the kitchen to the living room. The living room got a tile on

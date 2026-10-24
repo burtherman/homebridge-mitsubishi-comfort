@@ -7,7 +7,6 @@ import {
   DRY_SWITCH_NAME, FAN_ONLY_SWITCH_NAME, FAN_AUTO_SWITCH_NAME,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
-import type { LinkWatchTarget } from './link-watch';
 
 // HeaterCooler implementation (2.0): portions derived from
 // homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0, src/accessory.ts @ 83dfd18),
@@ -192,8 +191,6 @@ export class KumoThermostatAccessory {
   private cloudSyncPending: {
     label: string; sentAt: number; timeout: NodeJS.Timeout; path: 'local' | 'cloud'; contradicted: boolean;
   } | null = null;
-  // When the last streaming device_update arrived; read by the temporary link watch.
-  private lastCloudUpdateAt = 0;
   // Liveness of the unit's link to the cloud; see the "Cloud liveness" section.
   private readonly LIVENESS_CHECK_MS = 5 * 60 * 1000;
   private livenessTimer: NodeJS.Timeout | null = null;
@@ -204,9 +201,6 @@ export class KumoThermostatAccessory {
   private lastUnconfirmedLabel: string | undefined;
   // The power/mode the cloud last reported; see watchForCloudConfirmation.
   private lastCloudLabel: string | undefined;
-  // TEMPORARY (2.0 soak): log every cloud update for a minute after a LAN command;
-  // see logCloudWatch. Remove once the Comfort app "warming" question is settled.
-  private cloudWatchFrom = 0;
   // What our recent commands set, and until when a LAN read that disagrees is taken
   // as the unit still catching up; see contradictsRecentCommand.
   private readonly COMMAND_SETTLE_MS = 15000;
@@ -950,8 +944,6 @@ export class KumoThermostatAccessory {
       },
     } as Zone;
 
-    this.lastCloudUpdateAt = Date.now();
-    this.logCloudWatch(data as Record<string, unknown>, 'streaming');
     this.noteCloudSync(data);
     this.noteCloudFreshness(data);
 
@@ -1009,19 +1001,6 @@ export class KumoThermostatAccessory {
         this.platform.log.error('Status listener error:', err);
       }
     }
-  }
-
-  /** TEMPORARY (2.0 soak): what the link watch records about this unit; see link-watch.ts. */
-  public getLinkWatchInfo(): LinkWatchTarget {
-    return {
-      serial: this.deviceSerial,
-      name: this.accessory.displayName,
-      cloudOnly: !this.hasLocalControl(),
-      lastCloudUpdateAt: this.lastCloudUpdateAt,
-      roomTemp: this.currentStatus?.roomTemp,
-      mode: this.currentStatus ? (this.currentStatus.power === 0 ? 'off' : this.currentStatus.operationMode) : undefined,
-      reachable: this.isReachable(),
-    };
   }
 
   // Getter methods for platform to access private properties
@@ -1211,7 +1190,6 @@ export class KumoThermostatAccessory {
     const updateTimestamp = Date.now();
     if (zone.adapter) {
       this.applyZoneSensors(zone.adapter);
-      this.logCloudWatch(zone.adapter as unknown as Record<string, unknown>, 'polling');
       this.noteCloudSync(zone.adapter);
       this.noteCloudFreshness(zone.adapter);
     }
@@ -1426,7 +1404,6 @@ export class KumoThermostatAccessory {
     if (typeof api.requestDeviceStatus !== 'function') {
       return;
     }
-    this.cloudWatchFrom = Date.now();
     if (this.cloudSyncTimer) {
       clearTimeout(this.cloudSyncTimer);
     }
@@ -1492,26 +1469,6 @@ export class KumoThermostatAccessory {
     }, this.CLOUD_SYNC_WATCH_MS);
     timeout.unref?.();
     this.cloudSyncPending = { label, sentAt, timeout, path, contradicted: false };
-  }
-
-  /**
-   * TEMPORARY diagnostic for the 2.0 soak. After a LAN command the Comfort app was
-   * seen flipping between "warming" and off (2026-09-27, twice, both right after an
-   * off from heat) while the cloud's REST copy read off. Logs what the cloud sends
-   * for CLOUD_SYNC_WATCH_MS after each LAN command, to match against the app.
-   */
-  private logCloudWatch(data: Record<string, unknown>, source: 'streaming' | 'polling'): void {
-    if (!this.cloudWatchFrom || Date.now() - this.cloudWatchFrom > this.CLOUD_SYNC_WATCH_MS) {
-      return;
-    }
-    const extra = ['displayConfig', 'statusDisplay']
-      .filter((k) => data[k] !== undefined && data[k] !== null)
-      .map((k) => ` ${k}=${JSON.stringify(data[k])}`)
-      .join('');
-    this.platform.log.info(
-      `[CLOUD WATCH] ${this.accessory.displayName} +${((Date.now() - this.cloudWatchFrom) / 1000).toFixed(1)}s ` +
-      `via ${source}: power=${data.power} mode=${data.operationMode}${extra}`,
-    );
   }
 
   /** Log once when a cloud update matches the power/mode of the last LAN command. */

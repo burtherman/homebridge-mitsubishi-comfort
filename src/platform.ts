@@ -24,7 +24,6 @@ import {
 } from './local-api';
 import { MirrorController, MirrorStatePersistence } from './mirror';
 import { loadMirrorStore, saveMirrorStore } from './mirror-store';
-import { LinkWatch, LanAnswer } from './link-watch';
 
 /** How long the initial credential gather waits before falling back to retries. */
 const LOCAL_CRED_INITIAL_WAIT_MS = 25000;
@@ -116,16 +115,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   // storage dir available, e.g. in unit tests with a bare API stub).
   private credStorePath: string | null = null;
   private credStore = new Map<string, SerialCreds & { capturedAt: string }>();
-  // TEMPORARY (2.0 soak): records how cloud-only units' links behave; see link-watch.ts.
-  private static readonly LINK_WATCH_MS = 5 * 60 * 1000;
-  private linkWatchTimer: NodeJS.Timeout | null = null;
-  private linkWatchLastIp = new Map<string, string>();
-  // The watched unit usually has no working key (that's why it's cloud-only); a
-  // made-up one is rejected, and a rejection is an answer.
-  private static readonly LINK_WATCH_PROBE_CREDS: SerialCreds = {
-    password: Buffer.alloc(30).toString('base64'), cryptoSerial: '00'.repeat(9),
-  };
-
   // Device mirroring (opt-in). Constructed once after discovery when `mirror`
   // config is present; makes one unit follow another.
   private mirror: MirrorController | null = null;
@@ -202,11 +191,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
     if (this.localPollTimer) {
       clearInterval(this.localPollTimer);
       this.localPollTimer = null;
-    }
-
-    if (this.linkWatchTimer) {
-      clearInterval(this.linkWatchTimer);
-      this.linkWatchTimer = null;
     }
 
     // Stop the resilience watchdog
@@ -506,7 +490,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
       // Coarse resilience backstop — runs regardless of streaming/local mode.
       this.startResilienceWatchdog();
-      this.startLinkWatch();
 
       // Device mirroring (opt-in). Construct once — discovery can retry, so guard
       // on an existing controller to avoid double-registering source listeners.
@@ -940,55 +923,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
       }
     }
     return out;
-  }
-
-  /**
-   * TEMPORARY (2.0 soak), debug mode only: sample each cloud-only unit's link every
-   * few minutes into its own file. Changes nothing in HomeKit. See link-watch.ts.
-   */
-  private startLinkWatch(): void {
-    if (this.linkWatchTimer || !this.kumoConfig.debug) {
-      return;
-    }
-    let file: string | null = null;
-    try {
-      const dir = this.api?.user?.storagePath?.();
-      file = dir ? path.join(dir, 'mitsubishi-comfort-link-watch.log') : null;
-    } catch {
-      file = null;
-    }
-    const watch = new LinkWatch({
-      targets: () => this.accessoryHandlers.map(h => h.getLinkWatchInfo()),
-      requestStatus: (serial) => this.kumoAPI.requestDeviceStatus(serial),
-      streamInterruptedSince: (since) => this.kumoAPI.streamInterruptedSince(since),
-      lanProbe: (serial) => this.linkWatchLanProbe(serial),
-      adapterReportedAt: (serial) => this.kumoAPI.getDeviceLastUpdated(serial),
-      log: this.log,
-      file,
-    });
-    this.log.info(`[LINK WATCH] recording cloud-only units' links every ${KumoV3Platform.LINK_WATCH_MS / 60000} min` +
-      `${file ? ` to ${file}` : ''}`);
-    this.linkWatchTimer = setInterval(() => {
-      watch.tick().catch(e => this.log.debug(`[LINK WATCH] tick failed: ${(e as Error).message}`));
-    }, KumoV3Platform.LINK_WATCH_MS);
-    this.linkWatchTimer.unref?.();
-  }
-
-  /** Whether a Kumo adapter answers at the unit's LAN address, with any reply at all. */
-  private async linkWatchLanProbe(serial: string): Promise<{ answer: LanAnswer; ip?: string }> {
-    const creds = this.credStore.get(serial) ?? KumoV3Platform.LINK_WATCH_PROBE_CREDS;
-    const mac = (await this.getDeviceMacs([serial])).get(serial);
-    const ip = (mac ? this.readArpTable().get(mac.toLowerCase()) : undefined)
-      ?? this.linkWatchLastIp.get(serial)
-      ?? this.kumoConfig.localControlIps?.[serial];
-    if (!ip) {
-      return { answer: 'unknown' };
-    }
-    const result = await this.probeLocal(ip, creds);
-    if (result) {
-      this.linkWatchLastIp.set(serial, ip);
-    }
-    return { answer: result ? 'answers' : 'silent', ip };
   }
 
   /** Read the Linux ARP cache into a MAC→IP map; empty on non-Linux / unreadable. */
