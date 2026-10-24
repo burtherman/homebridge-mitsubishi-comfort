@@ -20,7 +20,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
 - **Fan speed** on each unit's tile: five speeds plus Auto
 - **Vane swing** on units with movable vanes, and optional fixed tilt positions
-- **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry Mode" switches (HomeKit's heater-cooler has no mode for them)
+- **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry Mode" switches (HomeKit's heater-cooler has no mode for them), and a **"Fan Auto"** switch for automatic fan speed
 - **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
 - Current temperature, a humidity sensor on units that have one, and a filter-change indicator
 - **Offline units show "No Response"** instead of a stale reading when the cloud reports the unit's Wi-Fi adapter disconnected (unless it's still reachable over the LAN)
@@ -103,6 +103,7 @@ Add the following to your Homebridge `config.json`:
 | `mirror` | array | No | **Opt-in (default: absent).** `{ source, target }` device-serial pairs; the target follows the source. See [Device Mirroring](#device-mirroring) |
 | `showDrySwitch` | boolean | No | Show a "Dry" switch on units that support dehumidify (default: true) |
 | `showFanOnlySwitch` | boolean | No | Show a "Fan Only" switch on units that support fan-only mode (default: true) |
+| `showFanAutoSwitch` | boolean | No | Show a "Fan Auto" switch on units with an automatic fan speed. On lets the unit pick its fan speed; off returns to the last speed you set (default: true) |
 | `showHumiditySensor` | boolean | No | Show indoor humidity as a humidity sensor on units that report it (default: true). Turn off if it crowds the unit's tile in the Home app |
 | `exposeVaneSlat` | boolean | No | Show a vane tilt control with five fixed positions on units with movable vanes (default: false). Off by default because the Home app groups it with window coverings, so a "close the blinds" command can reach it |
 

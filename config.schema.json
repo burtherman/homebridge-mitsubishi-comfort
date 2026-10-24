@@ -132,6 +132,12 @@
         "default": true,
         "description": "Show a \"Fan Only\" switch on units that support fan-only mode (no heating or cooling). Fan speed is a separate control on the unit's tile."
       },
+      "showFanAutoSwitch": {
+        "title": "Show Fan Auto switches",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a \"Fan Auto\" switch on units with an automatic fan speed. On lets the unit pick its fan speed; off returns to the last speed you set."
+      },
       "showHumiditySensor": {
         "title": "Show humidity sensors",
         "type": "boolean",
@@ -185,7 +191,7 @@
       "title": "HomeKit Display",
       "expandable": true,
       "expanded": false,
-      "items": ["showDrySwitch", "showFanOnlySwitch", "showHumiditySensor", "exposeVaneSlat"]
+      "items": ["showDrySwitch", "showFanOnlySwitch", "showFanAutoSwitch", "showHumiditySensor", "exposeVaneSlat"]
     },
     {
       "type": "fieldset",

@@ -4,7 +4,7 @@ import { KumoAPI } from './kumo-api';
 import {
   POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
   FanSpeed, FAN_SPEEDS, normalizeFanSpeed, VaneDirection, isVaneDirection,
-  DRY_SWITCH_NAME, FAN_ONLY_SWITCH_NAME,
+  DRY_SWITCH_NAME, FAN_ONLY_SWITCH_NAME, FAN_AUTO_SWITCH_NAME,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 import type { LinkWatchTarget } from './link-watch';
@@ -112,6 +112,7 @@ export class KumoThermostatAccessory {
   private filterMaintenanceService: Service | null = null;
   private fanOnlyService: Service | null = null;
   private dryService: Service | null = null;
+  private fanAutoService: Service | null = null;
   private humidityService: Service | null = null;
   // Fanv2 service carrying fan speed (RotationSpeed) and auto/manual (TargetFanState),
   // linked to the HeaterCooler. HeaterCooler itself can't express "fan auto".
@@ -308,6 +309,16 @@ export class KumoThermostatAccessory {
       this.unlinkSwitch(this.dryService);
     }
 
+    // Same for a cached Fan Auto switch (see setupFanAutoSwitch / hasFanSpeedAuto).
+    const cachedFanAutoSwitch = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-auto');
+    if (cachedFanAutoSwitch) {
+      this.fanAutoService = cachedFanAutoSwitch;
+      this.fanAutoService.getCharacteristic(this.platform.Characteristic.On)
+        .onGet(this.getFanAutoOn.bind(this))
+        .onSet(this.setFanAutoOn.bind(this));
+      this.unlinkSwitch(this.fanAutoService);
+    }
+
     // A cached Slats (vane) service needs its handlers now too; applyDeviceProfile
     // removes it if the unit has no vanes or exposeVaneSlat is off.
     if (this.accessory.getService(this.platform.Service.Slats)) {
@@ -421,6 +432,14 @@ export class KumoThermostatAccessory {
       this.setupDrySwitch();
     } else {
       this.removeDrySwitch();
+    }
+
+    // Fan auto as a switch too, like the Serin controller's: the fan's own Auto/Manual
+    // (TargetFanState) never appeared in the owner's Home app.
+    if (profile.hasFanSpeedAuto && this.platform.kumoConfig?.showFanAutoSwitch !== false) {
+      this.setupFanAutoSwitch();
+    } else {
+      this.removeFanAutoSwitch();
     }
 
     // Controls added above (auto fan, swing, the switches) start with defaults. On an
@@ -642,6 +661,53 @@ export class KumoThermostatAccessory {
     }
 
     this.platform.log.debug(`Added Dry switch for ${this.accessory.displayName}`);
+  }
+
+  /**
+   * "Fan Auto": on while the unit's fan speed is auto. On sends auto; off returns to
+   * the last fixed speed (lastManualFan). Both go through the same queue as
+   * TargetFanState, so the switch follows the fan's rules: it rides along with a
+   * power-on, is dropped with an off, and isn't sent alone to an off unit.
+   */
+  private setupFanAutoSwitch(): void {
+    if (this.fanAutoService) {
+      return;
+    }
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-auto');
+    this.fanAutoService =
+      existing ||
+      this.accessory.addService(this.platform.Service.Switch, FAN_AUTO_SWITCH_NAME, 'fan-auto');
+    this.nameSwitch(this.fanAutoService, FAN_AUTO_SWITCH_NAME, 'Fan Auto');
+    this.unlinkSwitch(this.fanAutoService);
+    this.fanAutoService.getCharacteristic(this.platform.Characteristic.On)
+      .onGet(this.getFanAutoOn.bind(this))
+      .onSet(this.setFanAutoOn.bind(this));
+    this.syncFanCharacteristics(this.currentStatus?.fanSpeed);
+    if (!existing) {
+      this.publishStructureChange();
+    }
+    this.platform.log.debug(`Added Fan Auto switch for ${this.accessory.displayName}`);
+  }
+
+  private removeFanAutoSwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-auto');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.publishStructureChange();
+    }
+    this.fanAutoService = null;
+  }
+
+  async getFanAutoOn(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return normalizeFanSpeed(this.currentStatus?.fanSpeed) === 'auto';
+  }
+
+  async setFanAutoOn(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const auto = value === true || value === 1;
+    this.platform.log.info(`[FAN] ${this.accessory.displayName}: HomeKit sent Fan Auto ${auto ? 'on' : 'off'}`);
+    return this.queueIntent({ fanAuto: auto });
   }
 
   private removeDrySwitch(): void {
@@ -1049,6 +1115,7 @@ export class KumoThermostatAccessory {
     }
     this.fanOnlyService?.updateCharacteristic(C.On, err as never);
     this.dryService?.updateCharacteristic(C.On, err as never);
+    this.fanAutoService?.updateCharacteristic(C.On, err as never);
   }
 
   /** Re-publish real values on recovery so the tile clears without waiting for a read. */
@@ -2419,6 +2486,7 @@ export class KumoThermostatAccessory {
       this.fanService.updateCharacteristic(
         C.TargetFanState, known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL);
     }
+    this.fanAutoService?.updateCharacteristic(C.On, known === 'auto');
     this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
     if (this.currentStatus) {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));

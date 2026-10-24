@@ -297,6 +297,56 @@ test('a switch renamed in the Home app keeps its name, even after the profile ar
   assert.strictEqual(fanOnly.getCharacteristic(C.Name).value, 'Fan Only', 'the default label still moves');
 });
 
+// ---- Fan Auto switch ---------------------------------------------------------------
+// Like the Serin CN105 controller's: the fan's own Auto/Manual (TargetFanState) never
+// appeared in the owner's Home app (2026-09-27), so auto fan is also a plain switch.
+
+const fanAutoSwitch = (accessory) => accessory.getServiceById(Service.Switch, 'fan-auto');
+
+test('Fan Auto is an unlinked "Fan Auto" switch on units with an auto fan speed', () => {
+  const { accessory, tile, applyProfile } = makeHarness();
+  applyProfile(profile());
+  const sw = fanAutoSwitch(accessory);
+  assert.ok(sw, 'switch added');
+  assert.strictEqual(sw.getCharacteristic(C.Name).value, 'Fan Auto');
+  assert.ok(!tile.linked.includes(sw), 'not linked, so the Home app labels it');
+});
+
+test('no Fan Auto switch on a unit without an auto fan speed', () => {
+  const { accessory, applyProfile } = makeHarness();
+  applyProfile(profile({ hasFanSpeedAuto: false }));
+  assert.strictEqual(fanAutoSwitch(accessory), null);
+});
+
+test('Fan Auto follows the unit: on in auto, off at a fixed speed', () => {
+  const { accessory, handler, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+  assert.strictEqual(fanAutoSwitch(accessory).getCharacteristic(C.On).value, true);
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+  assert.strictEqual(fanAutoSwitch(accessory).getCharacteristic(C.On).value, false);
+});
+
+test('Fan Auto on sends auto; off returns to the last fixed speed', async () => {
+  const { handler, sent, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
+  await handler.setFanAutoOn(true);
+  handler.updateFromZone(zone({ fanSpeed: 'auto' }));
+  await handler.setFanAutoOn(false);
+  assert.deepStrictEqual(sent, [{ fanSpeed: 'auto' }, { fanSpeed: 'powerful' }]);
+});
+
+test('Fan Auto on an off unit is not sent, and the switch goes back off', async () => {
+  const { accessory, handler, sent, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0, fanSpeed: 'low' }));
+  await handler.setFanAutoOn(true);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(sent, []);
+  assert.strictEqual(fanAutoSwitch(accessory).getCharacteristic(C.On).value, false);
+});
+
 // ---- After HomeKit stores the raw written value ---------------------------------
 // hap-nodejs stores a write's value as sent AFTER onSet resolves, over anything the
 // handler pushed: a slider's 30 over our 25, or a speed we declined to send to an

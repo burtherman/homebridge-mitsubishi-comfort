@@ -7,6 +7,7 @@ export const ACCESSORY_UUID_SUFFIX = ':heatercooler';
 // (accessory.ts nameSwitch). portal-dashboard finds the switches by these names.
 export const DRY_SWITCH_NAME = 'Dry Mode';
 export const FAN_ONLY_SWITCH_NAME = 'Fan Only';
+export const FAN_AUTO_SWITCH_NAME = 'Fan Auto';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';
 export const SOCKET_BASE_URL = 'https://socket-prod.kumocloud.com';
 // The LEGACY v2 cloud API — pykumo / Home Assistant's data source. Its login
@@ -51,6 +52,10 @@ export interface KumoConfig {
   // mode. Set false to hide.
   showDrySwitch?: boolean;
   showFanOnlySwitch?: boolean;
+  // "Fan Auto" switch on units with an auto fan speed (on = auto, off = the last fixed
+  // speed). Shown by default: the fan's own Auto/Manual control doesn't appear in the
+  // Home app. Set false to hide.
+  showFanAutoSwitch?: boolean;
   // Indoor humidity as a HumiditySensor service (HeaterCooler has no humidity
   // characteristic). Default true. The Home app can favor a sensor reading on a
   // combined tile; set false to drop it, or use Home's "Show as Separate Tiles".

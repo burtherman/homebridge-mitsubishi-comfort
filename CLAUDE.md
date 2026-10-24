@@ -163,6 +163,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
 - `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
 - `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). "Shown", not "on": each switch's state follows the unit's real mode. The fork hid them by default; ours stay shown because the HeaterCooler can't select dry or fan-only. (Their automations no longer survive the upgrade: 2.0 makes new accessories, see "Migration".)
+- `showFanAutoSwitch` - (2.0) Show the "Fan Auto" switch on units with an auto fan speed (default **true**).
 - `showHumiditySensor` - (2.0) Humidity as a `HumiditySensor` service (default true). Off also removes a cached one.
 
 ## HomeKit Characteristics Mapping (2.0: HeaterCooler)
@@ -189,6 +190,7 @@ schema, release).
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
 | Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Labelled "Fan Only" (`FAN_ONLY_SWITCH_NAME`; see `nameSwitch`) |
+| Switch "Fan Auto" (On) | fanSpeed === 'auto' | Separate `Switch` (subtype `fan-auto`), only with `hasFanSpeedAuto` and `showFanAutoSwitch !== false`. Same queue as TargetFanState (`queueIntent({ fanAuto })`): ON sends auto, OFF restores `lastManualFan`; not sent alone to an off unit. Added 2026-10-23 because TargetFanState never showed in the owner's Home app (the Serin has this switch) |
 | Switch "Dry Mode" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan Only |
 
 **Switch labels (2026-10-23):** inside a unit's page the Home app shows a switch LINKED to
