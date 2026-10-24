@@ -196,7 +196,7 @@ schema, release).
 **Switch labels (2026-10-23):** inside a unit's page the Home app shows a switch LINKED to
 the climate service with no label. Test bridge: same names, linked → blank, unlinked →
 labelled; unlinking an already-paired accessory showed the labels in place. So the Dry and
-Fan Only switches are not linked (`unlinkSwitch`); fan, humidity and filter still are. Renaming
+Fan Only switches are not linked (`unlinkFromTile`), nor (since 22:58 the same night) Fan Auto and the fan, so the units match the Serin ("5 Off", a separate "Fan" row); humidity and filter still are. Renaming
 them first ("Dry Mode", as the Serin does) did NOT fix it, even after a phone restart; the
 plain names stay because "Kitchen Dry" only repeats the unit. `nameSwitch` sets Name always
 and ConfiguredName only while it still holds a plugin-chosen name (empty, = Name, or
@@ -268,7 +268,7 @@ the accessory).
 
 ### Fan speed (2.0 stage 5)
 
-- Fanv2 service (subtype `airflow`), linked to the HeaterCooler (which is primary). Ported
+- Fanv2 service (subtype `airflow`), NOT linked to the HeaterCooler (which is primary) since 2026-10-23, like the Serin's fan. Ported
   from the fork's final design (`setupFanService`, `fanSpeedToRotation`, `rotationToFanSpeed`,
   `syncFanCharacteristics`, fan-tile OFF refusal).
 - **Fan writes share the power/mode queue** (`queueIntent` → `flushIntent` → `flushFanOnly`).

@@ -66,11 +66,13 @@ const zone = (over = {}) => ({
 
 // ---- Structure --------------------------------------------------------------
 
-test('the fan is its own Fanv2 service, linked to the primary HeaterCooler', () => {
+test('the fan is its own Fanv2 service, not linked to the primary HeaterCooler', () => {
+  // Unlinked like the Serin controller's fan (2026-10-23): its own "Fan" in the
+  // unit's list in the Home app, and counted in "5 Off".
   const { fan, tile } = makeHarness();
   assert.ok(fan, 'Fanv2 service with subtype "airflow"');
   assert.strictEqual(tile.primary, true, 'the HeaterCooler is the primary service');
-  assert.ok(tile.linked.includes(fan), 'the fan is linked to it');
+  assert.ok(!tile.linked.includes(fan), 'the fan is not linked to it');
   assert.strictEqual(tile.chars.has(C.RotationSpeed), false, 'no fan speed on the HeaterCooler itself');
 });
 
@@ -86,7 +88,6 @@ test('the Dry and Fan Only switches are not linked to the HeaterCooler', () => {
   assert.ok(dry && fanOnly, 'both switches added');
   assert.ok(!tile.linked.includes(dry), 'Dry not linked');
   assert.ok(!tile.linked.includes(fanOnly), 'Fan Only not linked');
-  assert.ok(tile.linked.includes(accessory.getServiceById(Service.Fanv2, 'airflow')), 'the fan stays linked');
 });
 
 test('cached switches an earlier build linked are unlinked', () => {
