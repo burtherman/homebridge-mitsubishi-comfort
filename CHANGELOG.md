@@ -2,7 +2,7 @@
 
 All notable changes to homebridge-mitsubishi-comfort.
 
-- **2.0.0** - Each unit is a HomeKit heater-cooler, with fan speed and vanes (unreleased)
+- **2.0.0** - Each unit is a HomeKit heater-cooler, with fan speed and vanes (2.0.0-beta.1 released October 2026 under the npm `beta` tag)
   - **Breaking: each unit becomes a new HomeKit accessory.** Assign each one to its room again and recreate scenes and automations that used it, including ones on its Dry and Fan switches. Converting the 1.x thermostat in place kept rooms but made the Home app draw each unit's combined tile as a switch ("All Off"); a test bridge showed that the same 2.0 accessory draws correctly when it's new to the Home app, and turns into a switch tile when an existing thermostat is changed into it. The plugin logs a warning for each unit it replaces. Power-on still returns to the unit's last mode
   - Added: **power is its own control**, separate from Heat / Cool / Auto. An "off" is always a real change, including for a unit in dry or fan-only, which retires the 1.7.1 workaround that reported those modes as Cool. **Power-on returns to the unit's last mode** (remembered across restarts, seeded from the cloud's `previousOperationMode`)
   - Added: **a real Idle state** (compressor resting, or fan-only), and heat and cool setpoints that each use their own mode's range from the device profile. 1.x gave both the union of every mode's range, so Cool could offer a Heat-range value the unit rejected (`invalidSpCoolRange`). The mode picker offers only what the unit can do
