@@ -188,8 +188,15 @@ schema, release).
 | HumiditySensor.CurrentRelativeHumidity | humidity | Separate service (HeaterCooler has no humidity characteristic), linked to the HeaterCooler. Created on the first reading; removed only when the cloud's zone record says `hasSensor: false`, `hasMhk2` not true and `humidity: null` (`applyZoneSensors`, at startup and on fallback polls). A missing reading alone never removes it |
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
-| Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Named "Fan" in 1.x; renamed only if it still has the old default ConfiguredName |
-| Switch "Dry" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan |
+| Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Labelled "Fan Only" (`FAN_ONLY_SWITCH_NAME`; see `nameSwitch`) |
+| Switch "Dry Mode" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan Only |
+
+**Switch labels (2026-10-23):** plain "Dry Mode" / "Fan Only", not "<unit> Dry". Inside a
+unit's page the Home app showed NO label for a switch named after its unit; the Serin
+controller's plain "Dry Mode" shows. `nameSwitch` sets Name always and ConfiguredName only
+while it still holds a plugin-chosen name (empty, = Name, or "<unit> Dry"/"<unit> Fan Only"),
+so a Home app rename survives restarts. Before this, setup rewrote ConfiguredName every
+time the profile arrived, undoing any rename. portal-dashboard matches these labels.
 
 There is **no TargetTemperature**. Removing that second writer is what stops a scene's
 captured target from collapsing the AUTO band.

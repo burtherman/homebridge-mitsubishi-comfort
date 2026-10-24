@@ -4,6 +4,7 @@ import { KumoAPI } from './kumo-api';
 import {
   POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone, Commands, MirrorState,
   FanSpeed, FAN_SPEEDS, normalizeFanSpeed, VaneDirection, isVaneDirection,
+  DRY_SWITCH_NAME, FAN_ONLY_SWITCH_NAME,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 import type { LinkWatchTarget } from './link-watch';
@@ -289,7 +290,7 @@ export class KumoThermostatAccessory {
       this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
         .onGet(this.getFanOnlyOn.bind(this))
         .onSet(this.setFanOnlyOn.bind(this));
-      this.renameLegacyFanSwitch();
+      this.nameSwitch(this.fanOnlyService, FAN_ONLY_SWITCH_NAME, 'Fan Only');
       this.linkSecondaryService(this.fanOnlyService);
     }
 
@@ -303,6 +304,7 @@ export class KumoThermostatAccessory {
       this.dryService.getCharacteristic(this.platform.Characteristic.On)
         .onGet(this.getDryOn.bind(this))
         .onSet(this.setDryOn.bind(this));
+      this.nameSwitch(this.dryService, DRY_SWITCH_NAME, 'Dry');
       this.linkSecondaryService(this.dryService);
     }
 
@@ -477,17 +479,13 @@ export class KumoThermostatAccessory {
     }
 
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'fan-only');
-    const displayName = this.accessory.context.device.displayName;
-    const switchName = `${displayName} Fan Only`;
 
     this.fanOnlyService =
       existing ||
-      this.accessory.addService(this.platform.Service.Switch, switchName, 'fan-only');
+      this.accessory.addService(this.platform.Service.Switch, FAN_ONLY_SWITCH_NAME, 'fan-only');
 
-    this.fanOnlyService.setCharacteristic(this.platform.Characteristic.Name, switchName);
-    this.fanOnlyService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
-    // Linked like the fan, humidity and filter. Left unlinked, the Home app groups the
-    // unit as a heater-cooler plus two switches and draws the tile as a switch.
+    this.nameSwitch(this.fanOnlyService, FAN_ONLY_SWITCH_NAME, 'Fan Only');
+    // Linked like the fan, humidity and filter, so the Home app groups them on one tile.
     this.linkSecondaryService(this.fanOnlyService);
 
     this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
@@ -514,34 +512,28 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * 1.x named the fan-only switch "<unit> Fan". With fan speed now on its own Fan
-   * control, that reads as a duplicate, so it becomes "<unit> Fan Only". Only a
-   * switch still carrying the old default name is renamed: a name set in the Home
-   * app (stored in ConfiguredName) is left alone. The subtype is unchanged, so
-   * automations on the switch keep working.
+   * Label a Dry or Fan Only switch. Inside a unit's page the Home app shows no label
+   * for a switch whose name starts with the unit's ("Kitchen Dry" was blank on the
+   * owner's iPhone, 2026-10-23), so the names are plain, like the Serin CN105
+   * controller's ("Dry Mode"), whose labels show.
    *
-   * The plugin sets Name and ConfiguredName together, and a Home app rename changes
-   * only ConfiguredName, so a ConfiguredName still equal to Name was never renamed.
-   * That matters when the unit was renamed in the Comfort app after 1.x created the
-   * switch (2026-09-28: "Front bedroom Fan" on a unit now called "Front Bedroom").
+   * Name is the label HomeKit starts from; a rename in the Home app changes only
+   * ConfiguredName. So ConfiguredName is set only while it still holds a name the
+   * plugin chose: empty, equal to Name, or the old default "<unit> <oldSuffix>".
    */
-  private renameLegacyFanSwitch(): void {
-    if (!this.fanOnlyService) {
-      return;
-    }
+  private nameSwitch(service: Service, name: string, oldSuffix: string): void {
     const C = this.platform.Characteristic;
-    const displayName = this.accessory.context.device.displayName;
-    const oldName = `${displayName} Fan`;
-    const name = this.fanOnlyService.getCharacteristic(C.Name).value;
-    const configured = this.fanOnlyService.getCharacteristic(C.ConfiguredName).value;
-    const current = configured === undefined || configured === null || configured === '' ? name : configured;
-    const renamedInHome = current !== name && String(current).toLowerCase() !== oldName.toLowerCase();
-    if (renamedInHome || typeof current !== 'string' || !current.endsWith(' Fan')) {
-      return;
+    const previous = service.getCharacteristic(C.Name).value;
+    const configured = service.getCharacteristic(C.ConfiguredName).value;
+    const current = typeof configured === 'string' ? configured.trim().toLowerCase() : '';
+    const oldDefault = `${this.accessory.context.device.displayName} ${oldSuffix}`.toLowerCase();
+    const pluginChosen = current === '' ||
+      current === String(previous ?? '').toLowerCase() ||
+      current === oldDefault;
+    service.setCharacteristic(C.Name, name);
+    if (pluginChosen) {
+      service.setCharacteristic(C.ConfiguredName, name);
     }
-    const newName = `${displayName} Fan Only`;
-    this.fanOnlyService.setCharacteristic(C.Name, newName);
-    this.fanOnlyService.setCharacteristic(C.ConfiguredName, newName);
   }
 
   private removeFanOnlySwitch(): void {
@@ -622,17 +614,13 @@ export class KumoThermostatAccessory {
     }
 
     const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'dry');
-    const displayName = this.accessory.context.device.displayName;
-    const switchName = `${displayName} Dry`;
 
     this.dryService =
       existing ||
-      this.accessory.addService(this.platform.Service.Switch, switchName, 'dry');
+      this.accessory.addService(this.platform.Service.Switch, DRY_SWITCH_NAME, 'dry');
 
-    this.dryService.setCharacteristic(this.platform.Characteristic.Name, switchName);
-    this.dryService.setCharacteristic(this.platform.Characteristic.ConfiguredName, switchName);
-    // Linked like the fan, humidity and filter. Left unlinked, the Home app groups the
-    // unit as a heater-cooler plus two switches and draws the tile as a switch.
+    this.nameSwitch(this.dryService, DRY_SWITCH_NAME, 'Dry');
+    // Linked like the fan, humidity and filter, so the Home app groups them on one tile.
     this.linkSecondaryService(this.dryService);
 
     this.dryService.getCharacteristic(this.platform.Characteristic.On)

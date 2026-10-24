@@ -251,47 +251,45 @@ test('No Response covers the fan tile', () => {
   }
 });
 
-// ---- "Fan" switch renamed "Fan Only" ------------------------------------------
+// ---- Switch labels -----------------------------------------------------------------
+// Inside a unit's page the Home app showed no label for "Kitchen Dry" / "Kitchen Fan
+// Only" (owner's iPhone, 2026-10-23); the Serin controller's "Dry Mode" shows. So the
+// switches get plain names, and a Home app rename (ConfiguredName) is never overwritten.
 
-test('a cached fan-only switch with the 1.x default name becomes "Fan Only"', () => {
+test('the switches get plain labels, set when the profile arrives', () => {
+  const { accessory, applyProfile } = makeHarness();
+  applyProfile(profile());
+  const dry = accessory.getServiceById(Service.Switch, 'dry');
+  const fanOnly = accessory.getServiceById(Service.Switch, 'fan-only');
+  for (const [sw, label] of [[dry, 'Dry Mode'], [fanOnly, 'Fan Only']]) {
+    assert.strictEqual(sw.getCharacteristic(C.Name).value, label);
+    assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, label);
+  }
+});
+
+test('switches with the old "<unit> ..." defaults are relabelled', () => {
   const accessory = makeAccessory('Kitchen', SERIAL);
-  const sw = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
-  sw.setCharacteristic(C.Name, 'Kitchen Fan');
-  sw.setCharacteristic(C.ConfiguredName, 'Kitchen Fan');
-  makeHarness({ accessory });
-  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Kitchen Fan Only');
+  const dry = accessory.addService(Service.Switch, 'Kitchen Dry', 'dry');
+  dry.setCharacteristic(C.Name, 'Kitchen Dry');
+  dry.setCharacteristic(C.ConfiguredName, 'Kitchen Dry');
+  const fanOnly = accessory.addService(Service.Switch, 'Kitchen Fan Only', 'fan-only');
+  fanOnly.setCharacteristic(C.Name, 'Kitchen Fan Only');
+  fanOnly.setCharacteristic(C.ConfiguredName, 'Kitchen Fan Only');
+  const { applyProfile } = makeHarness({ accessory });
+  applyProfile(profile());
+  assert.strictEqual(dry.getCharacteristic(C.ConfiguredName).value, 'Dry Mode');
+  assert.strictEqual(fanOnly.getCharacteristic(C.ConfiguredName).value, 'Fan Only');
 });
 
-// Found on the Pi 2026-09-28 by the portal-dashboard session: the front bedroom's 1.x
-// switch is "Front bedroom Fan" (Name and ConfiguredName), but the unit is now called
-// "Front Bedroom" in the Comfort app. Comparing against "<current unit name> Fan" read
-// it as a custom name, leaving "Front bedroom Fan" (fan-only) next to the new
-// "Front Bedroom Fan" (fan speed).
-test('a 1.x switch whose unit was renamed since is still recognized as the default', () => {
-  const accessory = makeAccessory('Front Bedroom', SERIAL);
-  const sw = accessory.addService(Service.Switch, 'Front bedroom Fan', 'fan-only');
-  sw.setCharacteristic(C.Name, 'Front bedroom Fan');
-  sw.setCharacteristic(C.ConfiguredName, 'Front bedroom Fan');
-  makeHarness({ accessory });
-  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Front Bedroom Fan Only');
-  assert.strictEqual(sw.getCharacteristic(C.Name).value, 'Front Bedroom Fan Only');
-});
-
-test('a Home app rename is kept even when the plugin-set name is a 1.x default', () => {
-  const accessory = makeAccessory('Front Bedroom', SERIAL);
-  const sw = accessory.addService(Service.Switch, 'Front bedroom Fan', 'fan-only');
-  sw.setCharacteristic(C.Name, 'Front bedroom Fan');
-  sw.setCharacteristic(C.ConfiguredName, 'Bedroom breeze');
-  makeHarness({ accessory });
-  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Bedroom breeze');
-});
-
-test('a fan-only switch renamed in the Home app keeps its name', () => {
+test('a switch renamed in the Home app keeps its name, even after the profile arrives', () => {
   const accessory = makeAccessory('Kitchen', SERIAL);
-  const sw = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
-  sw.setCharacteristic(C.ConfiguredName, 'Breeze');
-  makeHarness({ accessory });
-  assert.strictEqual(sw.getCharacteristic(C.ConfiguredName).value, 'Breeze');
+  const fanOnly = accessory.addService(Service.Switch, 'Kitchen Fan Only', 'fan-only');
+  fanOnly.setCharacteristic(C.Name, 'Kitchen Fan Only');
+  fanOnly.setCharacteristic(C.ConfiguredName, 'Breeze');
+  const { applyProfile } = makeHarness({ accessory });
+  applyProfile(profile());
+  assert.strictEqual(fanOnly.getCharacteristic(C.ConfiguredName).value, 'Breeze');
+  assert.strictEqual(fanOnly.getCharacteristic(C.Name).value, 'Fan Only', 'the default label still moves');
 });
 
 // ---- After HomeKit stores the raw written value ---------------------------------

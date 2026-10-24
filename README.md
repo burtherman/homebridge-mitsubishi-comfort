@@ -20,7 +20,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
 - **Fan speed** on each unit's tile: five speeds plus Auto
 - **Vane swing** on units with movable vanes, and optional fixed tilt positions
-- **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry" switches (HomeKit's heater-cooler has no mode for them)
+- **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry Mode" switches (HomeKit's heater-cooler has no mode for them)
 - **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
 - Current temperature, a humidity sensor on units that have one, and a filter-change indicator
 - **Offline units show "No Response"** instead of a stale reading when the cloud reports the unit's Wi-Fi adapter disconnected (unless it's still reachable over the LAN)
@@ -54,15 +54,16 @@ npm link
 
 ## Upgrading to 2.0
 
-2.0 changes each unit's HomeKit tile from a **thermostat** to a **heater-cooler**. Your units keep their names and rooms, but HomeKit treats the climate controls as new:
+2.0 changes each unit's HomeKit tile from a **thermostat** to a **heater-cooler**, and each unit comes back as a new HomeKit accessory:
 
-- **Automations and scenes that controlled a unit's thermostat stop working and need to be recreated.** Open each one in the Home app after upgrading and set the unit again (for example "Kitchen: Off").
-- **Automations on the Dry and Fan switches keep working.** The "Fan" switch is renamed "Fan Only" (it means fan-only mode, not fan speed, which is now its own control), unless you renamed it yourself.
+- **Each unit shows up as a new accessory**, usually in your home's default room. Move it back to its room. Names still come from the Comfort app.
+- **Scenes and automations that used a unit stop working and need to be recreated**, including ones on its Dry and Fan switches. The plugin logs a line for each unit it replaces.
+- Why a new accessory: converting the old thermostat in place made the Home app draw the unit's tile as a switch ("All Off"). A unit the Home app sees for the first time draws correctly.
 - Power is now its own control. An "off" automation sets the unit to Off regardless of its mode, including dry and fan-only.
-- **If a unit's tile looks like a switch** (a switch icon and "All Off", even when large), open the tile's settings and choose **Show as Separate Tiles**. The climate tile then draws as a heater-cooler. You can hide the Dry and Fan Only tiles from the Home view if you don't use them.
-- **Tiles come back small.** A large thermostat tile returns as a small tile, where tapping the icon turns the unit on or off. To make it large again: on the Home tab tap the More button (…), choose **Edit Home View**, tap the tile, tap the resize button, then **Done**.
+- The switches are labelled **Dry Mode** and **Fan Only** (fan-only mode, not fan speed, which is now its own control). A name you give them in the Home app is kept.
+- **Tiles come back small.** To make one large: on the Home tab tap the More button (…), choose **Edit Home View**, tap the tile, tap the resize button, then **Done**.
 
-If the Home app still shows the old thermostat, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough to clear HomeKit's cache.
+If the old thermostat is still there after upgrading, restart your iPhone or iPad. Force-quitting the Home app or restarting the Home hub isn't enough to clear HomeKit's cache.
 
 ## Configuration
 
@@ -283,7 +284,7 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 - Slats: Current Slat State, Current / Target Tilt Angle (five positions; units with movable vanes, when `exposeVaneSlat` is on)
 - Humidity Sensor: Current Relative Humidity (when the unit has a sensor)
 - Filter Maintenance: Filter Change Indication (when reported)
-- "Fan Only" and "Dry" switches (per unit, capability-gated)
+- "Fan Only" and "Dry Mode" switches (per unit, capability-gated)
 
 ## API Endpoints Used
 
