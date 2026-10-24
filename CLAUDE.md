@@ -164,6 +164,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
 - `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). "Shown", not "on": each switch's state follows the unit's real mode. The fork hid them by default; ours stay shown because the HeaterCooler can't select dry or fan-only. (Their automations no longer survive the upgrade: 2.0 makes new accessories, see "Migration".)
 - `showFanAutoSwitch` - (2.0) Show the "Fan Auto" switch on units with an auto fan speed (default **true**).
+- `allFanSpeeds` - (2.0) Offer all five fan speeds whatever the profile reports (default false: one slider step per speed the unit has).
 - `showHumiditySensor` - (2.0) Humidity as a `HumiditySensor` service (default true). Off also removes a cached one.
 
 ## HomeKit Characteristics Mapping (2.0: HeaterCooler)
@@ -181,7 +182,7 @@ schema, release).
 | CurrentTemperature | roomTemp | In Celsius |
 | HeatingThresholdTemperature | spHeat | THE heat setpoint in every mode (HEAT shows it; AUTO shows it as the low edge). Range = heat ∪ auto from the profile |
 | CoolingThresholdTemperature | spCool | THE cool setpoint in every mode, and the dry setpoint. Range = cool ∪ auto |
-| Fanv2 (subtype `airflow`).RotationSpeed | fanSpeed | 5 detents 0/25/50/75/100 = superQuiet/quiet/low/powerful/superPowerful. Never 'auto' |
+| Fanv2 (subtype `airflow`).RotationSpeed | fanSpeed | One step per speed the unit has (`fanLadder`, from the profile's `numberOfFanSpeeds`): k × 100/n. 3 speeds = 33/67/100 = quiet/low/powerful; 5 = 20…100. 0 sends the quietest, never off. Never 'auto' |
 | Fanv2.TargetFanState | fanSpeed === 'auto' | AUTO/MANUAL; registered only if the profile has `hasFanSpeedAuto`. MANUAL restores `lastManualFan` |
 | Fanv2.Active / CurrentFanState | power/mode/standby | Follows the unit. **Fan-tile OFF is refused** (a room-wide "turn off the fan" must not stop the heat pump); ON = setActive(1) |
 | HeaterCooler.SwingMode | airDirection === 'swing' | Registered only if `hasVaneSwing`. OFF restores `lastFixedVane` ('auto' if none seen) |
@@ -235,9 +236,11 @@ the accessory).
   may reset the fan to auto. Unconfirmed.
 - The fork tried fan auto as the slider's 0% first and dropped it (fork commit db4d2bb):
   0% reads as off, and in auto the unit may blow hard while the slider shows the slowest.
-- Kitchen fan: 100% (superPowerful) was sent and a local poll ~14s later reported
-  `powerful`. The units' profiles say 3 speeds, and the fork's claim that 3-speed units
-  accept all five doesn't hold here. The per-unit speed test is still pending.
+- **Speed test done 2026-10-24.** Kitchen and middle bedroom (LAN, fan-only, each of the five
+  sent, read at 4s and 16s): superQuiet came back as quiet and superPowerful as powerful.
+  Both profiles say 3 speeds, and they have 3. pykumo and the fork offer five on 3-speed
+  units ("under-report"); not true of ours. The front bedroom is cloud-only and its fan
+  speed is never reported back, so it couldn't be checked.
 
 ### Power and mode (2.0)
 
@@ -280,8 +283,11 @@ the accessory).
   an off unit off. Our 1.7.2 notes record a bare, mode-less LOCAL write reviving an off unit,
   and a fan write has no mode either. Not verified on our hardware — revisit after checking a
   fan-only write to an off unit over the LAN (then this can match the fork).
-- All five speeds are offered regardless of the profile's `numberOfFanSpeeds` (3 on our units).
-  The fork found it advisory on its units; the Pi checklist verifies each speed on each unit.
+- The slider offers the speeds the profile's `numberOfFanSpeeds` says (3 → quiet/low/powerful,
+  4 → pykumo's quiet/low/powerful/superPowerful, else all five), saved in
+  `context.fanSpeedCount` so a restart starts with the right steps. `allFanSpeeds: true`
+  offers all five anyway. A speed the unit lacks (set elsewhere) shows at the nearest one.
+  The quietest sits at 100/n, not 0: picking it used to send the Home app's fan off too.
 - Origin label `homekit:fan`; every successful fan write notifies the mirror (fan speed is in
   its signature).
 

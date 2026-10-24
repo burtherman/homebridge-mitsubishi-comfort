@@ -90,6 +90,6 @@ test('recovery republishes everything after a late profile', () => {
   applyProfile(profile);
   handler.setCloudConnected(true);
   assert.strictEqual(tile.getCharacteristic(C.Active).value, C.Active.ACTIVE);
-  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 25);
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 100 / 3, 'quiet, bottom of 3');
   assert.strictEqual(tile.getCharacteristic(C.CoolingThresholdTemperature).value, 24);
 });

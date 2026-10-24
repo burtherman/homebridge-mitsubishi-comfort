@@ -56,6 +56,10 @@ export interface KumoConfig {
   // speed). Shown by default: the fan's own Auto/Manual control doesn't appear in the
   // Home app. Set false to hide.
   showFanAutoSwitch?: boolean;
+  // Offer all five fan speeds whatever the unit's profile reports. Default false: the
+  // slider gets as many steps as the profile's numberOfFanSpeeds (three on most units).
+  // For a unit that reports fewer speeds than it has.
+  allFanSpeeds?: boolean;
   // Indoor humidity as a HumiditySensor service (HeaterCooler has no humidity
   // characteristic). Default true. The Home app can favor a sensor reading on a
   // combined tile; set false to drop it, or use Home's "Show as Separate Tiles".
@@ -223,8 +227,8 @@ export type FanSpeed = 'auto' | 'superQuiet' | 'quiet' | 'low' | 'powerful' | 's
  * the unit decide", not an airflow level, so anything mapping speeds onto a slider
  * must rank only `FAN_SPEEDS.slice(1)`.
  *
- * The profile's `numberOfFanSpeeds` is advisory and must not gate this list: on the
- * fork author's units, one reporting 3 accepted all five named speeds.
+ * Every speed the adapter vocabulary has. Which ones a unit really runs is its
+ * profile's `numberOfFanSpeeds` (accessory.ts:fanLadder).
  */
 export const FAN_SPEEDS: readonly FanSpeed[] = [
   'auto',

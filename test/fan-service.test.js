@@ -25,11 +25,11 @@ const { Characteristic, Service, makeLog, makeAccessory } = require('./helpers')
 const SERIAL = 'TESTSERIAL001';
 const C = Characteristic;
 
-function makeHarness({ accessory = makeAccessory('Kitchen', SERIAL) } = {}) {
+function makeHarness({ accessory = makeAccessory('Kitchen', SERIAL), config } = {}) {
   const sent = [];
   const listened = [];
   let profileCb = null;
-  const platform = { Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} } };
+  const platform = { Service, Characteristic, log: makeLog(), api: { updatePlatformAccessories() {} }, kumoConfig: config };
   const kumoAPI = {
     subscribeToDevice() {},
     onDeviceProfileUpdate(cb) { profileCb = cb; },
@@ -116,9 +116,9 @@ test('auto/manual appears only on units with an auto fan speed', () => {
 
 // ---- Slider <-> speed ---------------------------------------------------------
 
-test('the five speeds fill the slider evenly, one position each', async () => {
+test('before a profile, the five speeds fill the slider evenly, one position each', async () => {
   const { handler } = makeHarness();
-  const expected = { superQuiet: 0, quiet: 25, low: 50, powerful: 75, superPowerful: 100 };
+  const expected = { superQuiet: 20, quiet: 40, low: 60, powerful: 80, superPowerful: 100 };
   for (const [speed, pct] of Object.entries(expected)) {
     handler.updateFromZone(zone({ fanSpeed: speed }));
     assert.strictEqual(await handler.getRotationSpeed(), pct, speed);
@@ -126,7 +126,7 @@ test('the five speeds fill the slider evenly, one position each', async () => {
 });
 
 test('each slider position sends its own speed, and 0 is the quietest, not off', async () => {
-  const expected = { 0: 'superQuiet', 25: 'quiet', 50: 'low', 75: 'powerful', 100: 'superPowerful' };
+  const expected = { 0: 'superQuiet', 20: 'superQuiet', 40: 'quiet', 60: 'low', 80: 'powerful', 100: 'superPowerful' };
   for (const [pct, speed] of Object.entries(expected)) {
     const { handler, sent } = makeHarness();
     handler.updateFromZone(zone());
@@ -135,10 +135,63 @@ test('each slider position sends its own speed, and 0 is the quietest, not off',
   }
 });
 
+// The kitchen and middle bedroom report 3 speeds and have 3 (LAN test, 2026-10-24).
+test('a unit reporting 3 speeds gets three steps: quiet, low, powerful', async () => {
+  const third = 100 / 3;
+  const { handler, sent, fan, applyProfile } = makeHarness();
+  applyProfile(profile());
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).props.minStep, third);
+  handler.updateFromZone(zone());
+  for (const [speed, pct] of [['quiet', third], ['low', 2 * third], ['powerful', 100]]) {
+    handler.updateFromZone(zone({ fanSpeed: speed }));
+    assert.strictEqual(await handler.getRotationSpeed(), pct, speed);
+  }
+  for (const pct of [0, third, 2 * third, 100]) {
+    await handler.setRotationSpeed(pct);
+  }
+  assert.deepStrictEqual(sent.map((c) => c.fanSpeed), ['quiet', 'quiet', 'low', 'powerful']);
+});
+
+test('a speed a 3-speed unit lacks shows at the nearest one it has', async () => {
+  const { handler, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ fanSpeed: 'superQuiet' }));
+  assert.strictEqual(await handler.getRotationSpeed(), 100 / 3);
+  handler.updateFromZone(zone({ fanSpeed: 'superPowerful' }));
+  assert.strictEqual(await handler.getRotationSpeed(), 100);
+});
+
+test('a unit reporting 4 speeds gets pykumo\'s four', async () => {
+  const { handler, sent, applyProfile } = makeHarness();
+  applyProfile(profile({ numberOfFanSpeeds: 4 }));
+  handler.updateFromZone(zone());
+  for (const pct of [25, 50, 75, 100]) {
+    await handler.setRotationSpeed(pct);
+  }
+  assert.deepStrictEqual(sent.map((c) => c.fanSpeed), ['quiet', 'low', 'powerful', 'superPowerful']);
+});
+
+test('allFanSpeeds keeps all five on a unit reporting 3', async () => {
+  const { handler, sent, applyProfile } = makeHarness({ config: { allFanSpeeds: true } });
+  applyProfile(profile());
+  handler.updateFromZone(zone());
+  await handler.setRotationSpeed(20);
+  await handler.setRotationSpeed(100);
+  assert.deepStrictEqual(sent.map((c) => c.fanSpeed), ['superQuiet', 'superPowerful']);
+});
+
+test('the speed count is saved, so a restart starts with the right steps', async () => {
+  const first = makeHarness();
+  first.applyProfile(profile());
+  assert.strictEqual(first.accessory.context.fanSpeedCount, 3);
+  const { fan } = makeHarness({ accessory: first.accessory });
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).props.minStep, 100 / 3, 'before any profile');
+});
+
 test('a capitalised speed reported by the unit reads back as its own position', async () => {
   const { handler } = makeHarness();
   handler.updateFromZone(zone({ fanSpeed: 'Low' }));
-  assert.strictEqual(await handler.getRotationSpeed(), 50);
+  assert.strictEqual(await handler.getRotationSpeed(), 60);
 });
 
 // ---- Auto / manual ------------------------------------------------------------
@@ -149,7 +202,7 @@ test('auto shows on TargetFanState, and the slider keeps the last real speed', a
   handler.updateFromZone(zone({ fanSpeed: 'powerful' }));
   handler.updateFromZone(zone({ fanSpeed: 'auto' }));
   assert.strictEqual(await handler.getTargetFanState(), C.TargetFanState.AUTO);
-  assert.strictEqual(await handler.getRotationSpeed(), 75, 'still at powerful, not zero');
+  assert.strictEqual(await handler.getRotationSpeed(), 100, 'still at powerful (top of 3), not zero');
 });
 
 test('switching to AUTO sends auto; back to MANUAL restores the last real speed', async () => {
@@ -214,7 +267,7 @@ test('"on, fan quiet" from off is one command', async () => {
   const { handler, sent } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'cool' }));
   handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
-  await Promise.all([handler.setRotationSpeed(25), handler.setActive(C.Active.ACTIVE)]);
+  await Promise.all([handler.setRotationSpeed(40), handler.setActive(C.Active.ACTIVE)]);
   assert.deepStrictEqual(sent, [{ operationMode: 'cool', fanSpeed: 'quiet' }]);
 });
 
@@ -367,10 +420,10 @@ test('Fan Auto on an off unit is not sent, and the switch goes back off', async 
 test('the slider shows the real speed position after HomeKit stores the raw value', async () => {
   const { handler, fan } = makeHarness();
   handler.updateFromZone(zone());
-  await handler.setRotationSpeed(30);
-  fan.getCharacteristic(C.RotationSpeed).value = 30; // what hap-nodejs does next
+  await handler.setRotationSpeed(45);
+  fan.getCharacteristic(C.RotationSpeed).value = 45; // what hap-nodejs does next
   await new Promise((r) => setTimeout(r, 5));
-  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 25);
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 40);
 });
 
 test('a fan change not sent to an off unit snaps the slider back', async () => {
@@ -379,5 +432,5 @@ test('a fan change not sent to an off unit snaps the slider back', async () => {
   await handler.setRotationSpeed(100);
   fan.getCharacteristic(C.RotationSpeed).value = 100;
   await new Promise((r) => setTimeout(r, 5));
-  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 50, 'back to low');
+  assert.strictEqual(fan.getCharacteristic(C.RotationSpeed).value, 60, 'back to low');
 });

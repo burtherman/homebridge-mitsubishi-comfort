@@ -18,7 +18,7 @@ This plugin is not affiliated with, endorsed by, or associated with Mitsubishi E
 - **Adaptive polling** that activates only when streaming fails
 - **Each unit is a HomeKit heater-cooler** (since 2.0): power on/off separate from Heat / Cool / Auto, and a real Idle state when the compressor rests. Power-on returns to the unit's last mode
 - **Heat and cool setpoints** in their own modes, and a two-handle heat/cool band in Auto
-- **Fan speed** on each unit's tile: five speeds plus Auto
+- **Fan speed** on each unit's tile: one step per speed the unit has, plus Auto
 - **Vane swing** on units with movable vanes, and optional fixed tilt positions
 - **Fan-only and Dry (dehumidify) modes** as per-unit "Fan Only" and "Dry Mode" switches (HomeKit's heater-cooler has no mode for them), and a **"Fan Auto"** switch for automatic fan speed
 - **Setpoints snap to whole °F** (72°F is stored as 22.3°C), so the Home app and the Comfort app show the same number
@@ -104,6 +104,7 @@ Add the following to your Homebridge `config.json`:
 | `showDrySwitch` | boolean | No | Show a "Dry" switch on units that support dehumidify (default: true) |
 | `showFanOnlySwitch` | boolean | No | Show a "Fan Only" switch on units that support fan-only mode (default: true) |
 | `showFanAutoSwitch` | boolean | No | Show a "Fan Auto" switch on units with an automatic fan speed. On lets the unit pick its fan speed; off returns to the last speed you set (default: true) |
+| `allFanSpeeds` | boolean | No | Offer all five fan speeds even when the unit reports fewer (default: false). Units that report three speeds have run only three in testing, so the extra two just fall back to the nearest speed |
 | `showHumiditySensor` | boolean | No | Show indoor humidity as a humidity sensor on units that report it (default: true). Turn off if it crowds the unit's tile in the Home app |
 | `exposeVaneSlat` | boolean | No | Show a vane tilt control with five fixed positions on units with movable vanes (default: false). Off by default because the Home app groups it with window coverings, so a "close the blinds" command can reach it |
 
@@ -229,7 +230,7 @@ Each unit is a HomeKit **heater-cooler**:
 - **Modes** are Heat, Cool and Auto, limited to what the unit supports (a cooling-only unit offers only Cool).
 - **Setpoints:** Heat shows the heat setpoint, Cool shows the cool setpoint, and Auto shows both as a two-handle band. Each is limited to the range the unit reports for that mode.
 - **Status** shows Heating, Cooling or Idle. Idle means the unit is on but the compressor is resting, or it's in fan-only mode.
-- **Fan speed** is a slider with five speeds (quietest at the bottom, most powerful at the top) and an Auto setting on units that support it. The fan's own on/off can turn the unit on but won't turn it off, so a room-wide "turn off the fan" can't shut down the heat pump. Use the unit's power control for that. A fan change on a unit that's off isn't sent; change it after turning the unit on, or in the same scene.
+- **Fan speed** is a slider with one step for each speed the unit reports (three on most units: quiet, low and powerful; quietest at the bottom, most powerful at the top) and an Auto setting on units that support it. The fan's own on/off can turn the unit on but won't turn it off, so a room-wide "turn off the fan" can't shut down the heat pump. Use the unit's power control for that. A fan change on a unit that's off isn't sent; change it after turning the unit on, or in the same scene.
 - **Vanes** (units that report movable vanes): swing on/off is on the unit's tile. Turning swing off returns the vane to the last fixed position the unit was in. With `exposeVaneSlat` on, a separate vane control sets one of five fixed positions. Like fan speed, a vane change on a unit that's off isn't sent.
 - **Fan-only** is a separate **"Fan Only" switch** per unit (on units that support it). On = fan only; off = the unit powers down.
 - **Dry (dehumidify)** is a separate **"Dry" switch** per unit (on units that support it). While drying, the tile shows Cool, and its cool setpoint is the dry setpoint on units that have one. Fan and Dry are mutually exclusive.
@@ -281,7 +282,7 @@ The plugin uses a smart streaming-first approach with automatic fallback:
 ## Supported Characteristics
 
 - Heater Cooler: Active (power), Current Heater Cooler State (Inactive, Idle, Heating, Cooling), Target Heater Cooler State (Auto, Heat, Cool), Current Temperature, Heating / Cooling Threshold Temperature, Swing Mode (units with vane swing)
-- Fan (linked to the heater-cooler): Active, Current Fan State, Rotation Speed (five speeds), Target Fan State (Auto/Manual, on units with an auto fan speed)
+- Fan (linked to the heater-cooler): Active, Current Fan State, Rotation Speed (one step per speed the unit has), Target Fan State (Auto/Manual, on units with an auto fan speed)
 - Slats: Current Slat State, Current / Target Tilt Angle (five positions; units with movable vanes, when `exposeVaneSlat` is on)
 - Humidity Sensor: Current Relative Humidity (when the unit has a sensor)
 - Filter Maintenance: Filter Change Indication (when reported)

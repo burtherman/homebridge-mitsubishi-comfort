@@ -41,14 +41,34 @@ type Intent = {
 };
 
 /**
- * Fan slider step: five real speeds at 0/25/50/75/100, one position each. 0 is the
- * quietest speed, not off: power lives on the climate tile's Active, and routing an
- * off through the fan would put the heat pump within reach of a command aimed at
- * "the fan" (see setFanActive). All five speeds are offered whatever the profile's
- * `numberOfFanSpeeds` says; the fork found it advisory on its units (verify on ours).
- * (Ported from homebridge-mitsubishi-heatpump @ 83dfd18.)
+ * The fan speeds a unit really has, by its profile's `numberOfFanSpeeds` (pykumo's
+ * lists). pykumo and the fork offer all five on units reporting 3, saying those units
+ * under-report. Ours don't: the kitchen and middle bedroom (both report 3) were stepped
+ * through all five over the LAN on 2026-10-24 and reported superQuiet as quiet and
+ * superPowerful as powerful. `allFanSpeeds` restores the five for a unit that does
+ * under-report. No profile yet (or no count): all five.
  */
-const FAN_PCT_STEP = 25;
+export function fanLadder(count: number | undefined, allSpeeds: boolean): FanSpeed[] {
+  if (!allSpeeds && count === 3) {
+    return ['quiet', 'low', 'powerful'];
+  }
+  if (!allSpeeds && count === 4) {
+    return ['quiet', 'low', 'powerful', 'superPowerful'];
+  }
+  return FAN_SPEEDS.slice(1);
+}
+
+/**
+ * Slider position of the k-th speed (1-based) on an n-speed ladder: k * 100 / n, so
+ * three speeds sit at 33/67/100. 0 still sends the quietest speed, never off: power
+ * lives on the climate tile's Active, and routing an off through the fan would put the
+ * heat pump within reach of a command aimed at "the fan" (see setFanActive). Keeping
+ * the quietest speed off 0 means picking it doesn't read as off in the Home app.
+ * (Slider shape ported from homebridge-mitsubishi-heatpump @ 83dfd18, modified.)
+ */
+function fanStep(ladder: readonly FanSpeed[]): number {
+  return 100 / ladder.length;
+}
 
 /**
  * Fixed vane positions as Slats tilt angles, in physical order ('horizontal' is the
@@ -388,6 +408,8 @@ export class KumoThermostatAccessory {
     const T = this.platform.Characteristic.TargetHeaterCoolerState;
     const modes: number[] = profile.hasModeHeat ? [T.AUTO, T.HEAT, T.COOL] : [T.COOL];
     this.service.getCharacteristic(T).setProps({ validValues: modes });
+
+    this.applyFanSpeedCount(profile.numberOfFanSpeeds);
 
     // Fan auto/manual, only on units with an auto fan speed. Added after publish, so
     // the accessory must be re-published for HomeKit to see it.
@@ -2377,7 +2399,7 @@ export class KumoThermostatAccessory {
   /**
    * The Fanv2 service, linked to the HeaterCooler. HeaterCooler can't express "fan
    * auto" (TargetFanState is a Fanv2 characteristic), which is why fan speed lives
-   * here: RotationSpeed for the five speeds, TargetFanState for auto/manual (added
+   * here: RotationSpeed for the unit's speeds (fanLadder), TargetFanState for auto/manual (added
    * from the profile, see applyDeviceProfile). No publishStructureChange: this runs
    * from the constructor, and Homebridge's own registration picks it up.
    */
@@ -2400,24 +2422,63 @@ export class KumoThermostatAccessory {
     // minValue must stay 0: hap-nodejs rejects a write below minValue, and the Home
     // app sends 0 when the slider is dragged to the bottom.
     this.fanService.getCharacteristic(C.RotationSpeed)
-      .setProps({ minValue: 0, maxValue: 100, minStep: FAN_PCT_STEP })
+      .setProps({ minValue: 0, maxValue: 100, minStep: fanStep(this.fanLadder()) })
       .onGet(this.getRotationSpeed.bind(this))
       .onSet(this.setRotationSpeed.bind(this));
 
     this.unlinkFromTile(this.fanService);
   }
 
-  /** Fan speed -> slider percent. 'auto' shows the last real speed (TargetFanState says auto). */
+  /**
+   * This unit's speeds. Before the profile arrives, the count saved from the last run
+   * (so a restart doesn't flip the slider to five steps and back).
+   */
+  private fanLadder(): FanSpeed[] {
+    const count = this.deviceProfile?.numberOfFanSpeeds ?? this.accessory.context?.fanSpeedCount;
+    return fanLadder(count, this.platform.kumoConfig?.allFanSpeeds === true);
+  }
+
+  /** Re-step the slider when the profile's speed count differs from the one it was built with. */
+  private applyFanSpeedCount(count: number): void {
+    if (this.accessory.context && this.accessory.context.fanSpeedCount !== count) {
+      this.accessory.context.fanSpeedCount = count;
+    }
+    if (!this.fanService) {
+      return;
+    }
+    const C = this.platform.Characteristic;
+    const step = fanStep(this.fanLadder());
+    const rotation = this.fanService.getCharacteristic(C.RotationSpeed);
+    if (rotation.props?.minStep !== step) {
+      rotation.setProps({ minStep: step });
+      this.syncFanCharacteristics(this.currentStatus?.fanSpeed);
+    }
+  }
+
+  /**
+   * Fan speed -> slider percent. 'auto' shows the last real speed (TargetFanState says
+   * auto). A speed the unit doesn't have (superQuiet on a 3-speed unit, set elsewhere)
+   * shows at the nearest one it does.
+   */
   private fanSpeedToRotation(speed: string | undefined): number {
     const known = normalizeFanSpeed(speed);
     const shown = known && known !== 'auto' ? known : this.lastManualFan;
-    return (FAN_SPEEDS.indexOf(shown) - 1) * FAN_PCT_STEP;
+    const ladder = this.fanLadder();
+    const rank = FAN_SPEEDS.indexOf(shown);
+    let k = 0;
+    ladder.forEach((s, i) => {
+      if (Math.abs(FAN_SPEEDS.indexOf(s) - rank) < Math.abs(FAN_SPEEDS.indexOf(ladder[k]) - rank)) {
+        k = i;
+      }
+    });
+    return (k + 1) * fanStep(ladder);
   }
 
-  /** Slider percent -> a real fan speed. Never 'auto'. */
+  /** Slider percent -> a real fan speed. Never 'auto'; 0 is the quietest. */
   private rotationToFanSpeed(pct: number): FanSpeed {
-    const i = Math.round(pct / FAN_PCT_STEP) + 1;
-    return FAN_SPEEDS[Math.min(Math.max(i, 1), FAN_SPEEDS.length - 1)];
+    const ladder = this.fanLadder();
+    const k = Math.round(pct / fanStep(ladder));
+    return ladder[Math.min(Math.max(k, 1), ladder.length) - 1];
   }
 
   async getFanActive(): Promise<CharacteristicValue> {

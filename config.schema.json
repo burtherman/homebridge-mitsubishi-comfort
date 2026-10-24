@@ -138,6 +138,12 @@
         "default": true,
         "description": "Show a \"Fan Auto\" switch on units with an automatic fan speed. On lets the unit pick its fan speed; off returns to the last speed you set."
       },
+      "allFanSpeeds": {
+        "title": "Offer all five fan speeds",
+        "type": "boolean",
+        "default": false,
+        "description": "Give the fan slider all five speeds even when the unit reports fewer. Off, the slider has one step per speed the unit reports (three on most units)."
+      },
       "showHumiditySensor": {
         "title": "Show humidity sensors",
         "type": "boolean",
@@ -191,7 +197,7 @@
       "title": "HomeKit Display",
       "expandable": true,
       "expanded": false,
-      "items": ["showDrySwitch", "showFanOnlySwitch", "showFanAutoSwitch", "showHumiditySensor", "exposeVaneSlat"]
+      "items": ["showDrySwitch", "showFanOnlySwitch", "showFanAutoSwitch", "allFanSpeeds", "showHumiditySensor", "exposeVaneSlat"]
     },
     {
       "type": "fieldset",
