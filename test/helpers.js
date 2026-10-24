@@ -101,6 +101,7 @@ function makeService(type, name, subtype) {
     linked: [],
     setPrimaryService(v = true) { svc.primary = v; },
     addLinkedService(other) { if (!svc.linked.includes(other)) svc.linked.push(other); },
+    removeLinkedService(other) { const i = svc.linked.indexOf(other); if (i >= 0) svc.linked.splice(i, 1); },
   };
   return svc;
 }

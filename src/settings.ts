@@ -3,9 +3,8 @@ export const PLUGIN_NAME = 'homebridge-mitsubishi-comfort';
 // Appended to the serial for 2.0 accessory UUIDs (platform.ts says why). Changing it
 // replaces every accessory again.
 export const ACCESSORY_UUID_SUFFIX = ':heatercooler';
-// Dry / fan-only switch labels. Plain, not "<unit> Dry": the Home app shows no label
-// for a switch named after its unit (accessory.ts nameSwitch). portal-dashboard
-// finds the switches by these names.
+// Dry / fan-only switch labels. Plain, not "<unit> Dry", like the Serin controller's
+// (accessory.ts nameSwitch). portal-dashboard finds the switches by these names.
 export const DRY_SWITCH_NAME = 'Dry Mode';
 export const FAN_ONLY_SWITCH_NAME = 'Fan Only';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';

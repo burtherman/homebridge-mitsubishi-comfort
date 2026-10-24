@@ -291,7 +291,7 @@ export class KumoThermostatAccessory {
         .onGet(this.getFanOnlyOn.bind(this))
         .onSet(this.setFanOnlyOn.bind(this));
       this.nameSwitch(this.fanOnlyService, FAN_ONLY_SWITCH_NAME, 'Fan Only');
-      this.linkSecondaryService(this.fanOnlyService);
+      this.unlinkSwitch(this.fanOnlyService);
     }
 
     // Same for a cached dry switch (see setupDrySwitch / hasModeDry).
@@ -305,7 +305,7 @@ export class KumoThermostatAccessory {
         .onGet(this.getDryOn.bind(this))
         .onSet(this.setDryOn.bind(this));
       this.nameSwitch(this.dryService, DRY_SWITCH_NAME, 'Dry');
-      this.linkSecondaryService(this.dryService);
+      this.unlinkSwitch(this.dryService);
     }
 
     // A cached Slats (vane) service needs its handlers now too; applyDeviceProfile
@@ -485,8 +485,7 @@ export class KumoThermostatAccessory {
       this.accessory.addService(this.platform.Service.Switch, FAN_ONLY_SWITCH_NAME, 'fan-only');
 
     this.nameSwitch(this.fanOnlyService, FAN_ONLY_SWITCH_NAME, 'Fan Only');
-    // Linked like the fan, humidity and filter, so the Home app groups them on one tile.
-    this.linkSecondaryService(this.fanOnlyService);
+    this.unlinkSwitch(this.fanOnlyService);
 
     this.fanOnlyService.getCharacteristic(this.platform.Characteristic.On)
       .onGet(this.getFanOnlyOn.bind(this))
@@ -512,10 +511,10 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Label a Dry or Fan Only switch. Inside a unit's page the Home app shows no label
-   * for a switch whose name starts with the unit's ("Kitchen Dry" was blank on the
-   * owner's iPhone, 2026-10-23), so the names are plain, like the Serin CN105
-   * controller's ("Dry Mode"), whose labels show.
+   * Label a Dry or Fan Only switch with a plain name, like the Serin CN105
+   * controller's ("Dry Mode"): inside a unit's page "Kitchen Dry" only repeats the
+   * unit. (The labels that were blank on 2026-10-23 were blank because the switches
+   * were linked, see unlinkSwitch, not because of their names.)
    *
    * Name is the label HomeKit starts from; a rename in the Home app changes only
    * ConfiguredName. So ConfiguredName is set only while it still holds a name the
@@ -620,8 +619,7 @@ export class KumoThermostatAccessory {
       this.accessory.addService(this.platform.Service.Switch, DRY_SWITCH_NAME, 'dry');
 
     this.nameSwitch(this.dryService, DRY_SWITCH_NAME, 'Dry');
-    // Linked like the fan, humidity and filter, so the Home app groups them on one tile.
-    this.linkSecondaryService(this.dryService);
+    this.unlinkSwitch(this.dryService);
 
     this.dryService.getCharacteristic(this.platform.Characteristic.On)
       .onGet(this.getDryOn.bind(this))
@@ -766,6 +764,21 @@ export class KumoThermostatAccessory {
     this.linkSecondaryService(this.humidityService);
     if (!existing) {
       this.publishStructureChange();
+    }
+  }
+
+  /**
+   * The Dry and Fan Only switches are NOT linked to the HeaterCooler (the fan,
+   * humidity and filter are). Inside a unit's page the Home app shows a linked
+   * switch with no label, and the same switch unlinked with its label; unlinking an
+   * already-paired accessory's switches shows the labels in place (test bridge,
+   * 2026-10-23). Unlinking doesn't split the tile: that was the 1.x migration.
+   * Removes a link an earlier 2.0 build cached.
+   */
+  private unlinkSwitch(service: Service): void {
+    const primary = this.service as unknown as { removeLinkedService?: (s: Service) => void };
+    if (typeof primary.removeLinkedService === 'function') {
+      primary.removeLinkedService(service);
     }
   }
 

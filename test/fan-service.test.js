@@ -74,28 +74,33 @@ test('the fan is its own Fanv2 service, linked to the primary HeaterCooler', () 
   assert.strictEqual(tile.chars.has(C.RotationSpeed), false, 'no fan speed on the HeaterCooler itself');
 });
 
-// Found on the 2.0 rollout (2026-09-27): with the Dry and Fan Only switches left
-// unlinked, the Home app grouped each unit as a heater-cooler plus two switches and
-// drew the combined tile as a switch ("All Off"). Shown as separate tiles, the
-// heater-cooler looked right, so the services were fine and only the grouping wasn't.
-test('the Dry and Fan Only switches are linked to the HeaterCooler too', () => {
+// Test bridge, 2026-10-23: inside a unit's page the Home app shows a LINKED switch
+// with no label and an unlinked one with its label ("Dry Mode"). An already-paired
+// accessory picks up the unlinking in place. (The tile drawn as a switch, blamed on
+// unlinked switches during the 2.0 rollout, was the in-place 1.x migration.)
+test('the Dry and Fan Only switches are not linked to the HeaterCooler', () => {
   const { accessory, tile, applyProfile } = makeHarness();
   applyProfile(profile());
   const dry = accessory.getServiceById(Service.Switch, 'dry');
   const fanOnly = accessory.getServiceById(Service.Switch, 'fan-only');
   assert.ok(dry && fanOnly, 'both switches added');
-  assert.ok(tile.linked.includes(dry), 'Dry linked');
-  assert.ok(tile.linked.includes(fanOnly), 'Fan Only linked');
+  assert.ok(!tile.linked.includes(dry), 'Dry not linked');
+  assert.ok(!tile.linked.includes(fanOnly), 'Fan Only not linked');
+  assert.ok(tile.linked.includes(accessory.getServiceById(Service.Fanv2, 'airflow')), 'the fan stays linked');
 });
 
-test('switches restored from the 1.x cache get linked as well', () => {
+test('cached switches an earlier build linked are unlinked', () => {
   const accessory = makeAccessory('Kitchen', SERIAL);
-  const cachedFan = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
-  const cachedDry = accessory.addService(Service.Switch, 'Kitchen Dry', 'dry');
-  const { tile, applyProfile } = makeHarness({ accessory });
+  // As restored from the cache: the HeaterCooler already links both switches.
+  const tile = accessory.addService(Service.HeaterCooler, 'Kitchen');
+  const cachedFan = accessory.addService(Service.Switch, 'Fan Only', 'fan-only');
+  const cachedDry = accessory.addService(Service.Switch, 'Dry Mode', 'dry');
+  tile.addLinkedService(cachedFan);
+  tile.addLinkedService(cachedDry);
+  const { applyProfile } = makeHarness({ accessory });
   applyProfile(profile());
-  assert.ok(tile.linked.includes(cachedFan), 'cached Fan Only linked');
-  assert.ok(tile.linked.includes(cachedDry), 'cached Dry linked');
+  assert.ok(!tile.linked.includes(cachedFan), 'cached Fan Only unlinked');
+  assert.ok(!tile.linked.includes(cachedDry), 'cached Dry unlinked');
 });
 
 test('auto/manual appears only on units with an auto fan speed', () => {

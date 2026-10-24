@@ -191,12 +191,15 @@ schema, release).
 | Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Labelled "Fan Only" (`FAN_ONLY_SWITCH_NAME`; see `nameSwitch`) |
 | Switch "Dry Mode" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan Only |
 
-**Switch labels (2026-10-23):** plain "Dry Mode" / "Fan Only", not "<unit> Dry". Inside a
-unit's page the Home app showed NO label for a switch named after its unit; the Serin
-controller's plain "Dry Mode" shows. `nameSwitch` sets Name always and ConfiguredName only
-while it still holds a plugin-chosen name (empty, = Name, or "<unit> Dry"/"<unit> Fan Only"),
-so a Home app rename survives restarts. Before this, setup rewrote ConfiguredName every
-time the profile arrived, undoing any rename. portal-dashboard matches these labels.
+**Switch labels (2026-10-23):** inside a unit's page the Home app shows a switch LINKED to
+the climate service with no label. Test bridge: same names, linked → blank, unlinked →
+labelled; unlinking an already-paired accessory showed the labels in place. So the Dry and
+Fan Only switches are not linked (`unlinkSwitch`); fan, humidity and filter still are. Renaming
+them first ("Dry Mode", as the Serin does) did NOT fix it, even after a phone restart; the
+plain names stay because "Kitchen Dry" only repeats the unit. `nameSwitch` sets Name always
+and ConfiguredName only while it still holds a plugin-chosen name (empty, = Name, or
+"<unit> Dry"/"<unit> Fan Only"), so a Home app rename survives restarts (setup used to rewrite
+it every time the profile arrived). portal-dashboard matches these labels.
 
 There is **no TargetTemperature**. Removing that second writer is what stops a scene's
 captured target from collapsing the AUTO band.
