@@ -162,7 +162,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 - `localPollInterval` - Seconds between local status polls when `localControl` is on (default: 15, min: 5, max: 120)
 - `localControlIps` - Optional `{ "<deviceSerial>": "<ip>" }` map to skip LAN discovery for specific units
 - `mirror` - **Opt-in device mirroring (since 1.8.0).** Array of `{ source, target }` device-serial pairs. Makes `target` follow `source`: whenever the source's commanded state changes (via any control path — wall thermostat, Kumo app, or HomeKit), the source's full state (mode, setpoints, on/off, fan) is copied to the target. One-way; a manual change to the target holds until the next source change re-syncs it. See "Device Mirroring".
-- `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). "Shown", not "on": each switch's state follows the unit's real mode. The fork hid them by default; ours stay shown because they're the only HomeKit controls whose automations survive the Thermostat → HeaterCooler move.
+- `showDrySwitch` / `showFanOnlySwitch` - (2.0) Show the Dry / Fan switches on capable units (default **true**, opt-out). "Shown", not "on": each switch's state follows the unit's real mode. The fork hid them by default; ours stay shown because the HeaterCooler can't select dry or fan-only. (Their automations no longer survive the upgrade: 2.0 makes new accessories, see "Migration".)
 - `showHumiditySensor` - (2.0) Humidity as a `HumiditySensor` service (default true). Off also removes a cached one.
 
 ## HomeKit Characteristics Mapping (2.0: HeaterCooler)
@@ -194,21 +194,29 @@ schema, release).
 There is **no TargetTemperature**. Removing that second writer is what stops a scene's
 captured target from collapsing the AUTO band.
 
-**Migration:** the constructor removes a cached `Thermostat` service and logs
-`migrated Thermostat -> HeaterCooler`. Accessory UUIDs come from the serial, so name and
-room survive; automations bound to the thermostat must be recreated. Switch subtypes are
-unchanged, so switch automations survive. Owner's install: one automation (skylight opens →
-all units off) — rebuild it right after upgrading and verify from the log.
+**Migration (changed 2026-10-23):** 2.0 does NOT convert the 1.x accessory in place. Each
+unit gets a new accessory, UUID `generate(serial + ACCESSORY_UUID_SUFFIX)` (`':heatercooler'`,
+`settings.ts`); the 1.x accessory (UUID from the bare serial) is swept as stale by discovery.
+`lastActiveMode` is copied over, and a warning tells the owner to reassign the room and
+recreate scenes and automations, switch ones included (new accessory = new switch IDs).
+Changing the suffix replaces every accessory again. portal-dashboard addresses units by HAP
+aid (`device_map.yaml`), so update it whenever accessories are replaced. Owner's install:
+one automation (skylight opens → all units off) — rebuild it right after upgrading and
+verify from the log.
 
-**Home app tile (observed 2026-09-27, owner's iPhone):**
-- Every upgraded unit's *combined* tile drew as a switch ("All Off"), even at the large size.
-  "Show as Separate Tiles" draws the heater-cooler correctly, so the services are fine.
-- Primary + linked services do NOT control the combined tile's look. Linking the switches
-  (`004a583`) didn't change it. The fork found the same with its humidity sensor
-  (fork commit 6caceef).
-- `moveTileServiceFirst` (`a7f6aa2`) lists the HeaterCooler first, the way 1.x's Thermostat
-  was. That didn't change the combined tile either (owner checked after the deploy). So
-  it's neither primary, links nor order; what iOS keys the combined tile on is unknown.
+**Home app tile: cause found 2026-10-23.** Through the 2.0 soak every upgraded unit's
+*combined* tile drew as a switch ("All Off"); primary, links (`004a583`) and service order
+(`a7f6aa2`, since removed) changed nothing. A throwaway hap-nodejs bridge on the Mac settled
+it: paired fresh, every layout drew a proper climate tile (Thermostat like the Serin
+controller's, HeaterCooler alone, HeaterCooler + switches, and an exact copy of 2.0's linked
+layout). An accessory paired as 1.x and then migrated in place to 2.0's layout, same UUID,
+turned into a switch tile right away. iOS keeps its picture of an accessory it already
+knows, hence the new UUIDs above. Category is irrelevant: hap-nodejs only sends it for the
+top-level (bridge) accessory, never a bridged one. Same family as the controller-cache
+gotcha in the Pi deployment notes (services added at runtime don't show until iOS forgets
+the accessory).
+
+**Home app observations (2026-09-27, owner's iPhone):**
 - **No fan Auto control** appeared, though `TargetFanState` is published on every unit. The
   fork's research says the Home app shows it as Manual | Auto. The Home app sent
   `TargetFanState` AUTO with two mode changes (21:38:24 and 21:38:30), so a mode change

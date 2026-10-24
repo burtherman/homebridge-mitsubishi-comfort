@@ -2,11 +2,12 @@
 
 // Moving from the 1.x Thermostat to the 2.0 HeaterCooler.
 //
-// - An accessory cached by 1.x carries a Thermostat service. It's removed on load,
-//   or the unit would show two competing climate tiles. The UUID comes from the
-//   serial, so the accessory itself (room, name) is kept.
-// - The Dry and Fan switches keep their subtypes, so HomeKit automations on them
-//   survive. They're on by default and can be turned off in config.
+// - 2.0 replaces each 1.x accessory with a new one (new UUID) rather than swapping
+//   the Thermostat for a HeaterCooler in place: iOS draws an in-place-migrated
+//   accessory's tile as a switch. That's tested in discovery-retry.test.js; the
+//   handler only ever builds a HeaterCooler.
+// - The Dry and Fan switches keep their subtypes across restarts. They're on by
+//   default and can be turned off in config.
 // - Humidity moves to a HumiditySensor service (HeaterCooler has no humidity
 //   characteristic), on by default.
 // - Mirroring updates the target's HeaterCooler tile, not Thermostat characteristics.
@@ -60,18 +61,14 @@ const zone = (over = {}) => ({
   },
 });
 
-test('a cached 1.x Thermostat service is replaced by a HeaterCooler', () => {
-  const accessory = makeAccessory('Kitchen', SERIAL);
-  accessory.addService(Service.Thermostat, 'Kitchen');
-  const { infos } = makeHarness({ accessory });
-  assert.strictEqual(accessory.getService(Service.Thermostat), null, 'old tile removed');
-  assert.ok(accessory.getService(Service.HeaterCooler), 'new tile added');
-  assert.ok(infos.some((m) => /migrated Thermostat -> HeaterCooler/.test(m)), 'the migration is logged');
+test('the unit is a HeaterCooler, never a Thermostat', () => {
+  const { accessory } = makeHarness();
+  assert.ok(accessory.getService(Service.HeaterCooler), 'HeaterCooler tile');
+  assert.strictEqual(accessory.getService(Service.Thermostat), null, 'no Thermostat');
 });
 
-test('cached Dry and Fan switches are kept across the migration', () => {
+test('cached Dry and Fan switches are kept across a restart', () => {
   const accessory = makeAccessory('Kitchen', SERIAL);
-  accessory.addService(Service.Thermostat, 'Kitchen');
   const dry = accessory.addService(Service.Switch, 'Kitchen Dry', 'dry');
   const fan = accessory.addService(Service.Switch, 'Kitchen Fan', 'fan-only');
   const { applyProfile } = makeHarness({ accessory });

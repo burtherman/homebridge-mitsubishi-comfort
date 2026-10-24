@@ -14,7 +14,7 @@ import * as path from 'path';
 
 import * as fs from 'fs';
 
-import { PLATFORM_NAME, PLUGIN_NAME, KumoConfig } from './settings';
+import { PLATFORM_NAME, PLUGIN_NAME, ACCESSORY_UUID_SUFFIX, KumoConfig } from './settings';
 import { KumoAPI } from './kumo-api';
 import { loadCredStore, saveCredStore } from './cred-store';
 import { KumoThermostatAccessory } from './accessory';
@@ -330,8 +330,13 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
             continue;
           }
 
-          // Generate unique ID for this device
-          const uuid = this.api.hap.uuid.generate(deviceSerial);
+          // 2.0 accessories get a new identity. iOS keeps its picture of an accessory
+          // it has already paired: one that changed in place from 1.x's Thermostat to
+          // a HeaterCooler draws its combined tile as a switch, while the same layout
+          // paired fresh draws correctly (both reproduced on a test bridge,
+          // 2026-10-23). The 1.x accessory (UUID from the bare serial) is swept below
+          // as stale.
+          const uuid = this.api.hap.uuid.generate(deviceSerial + ACCESSORY_UUID_SUFFIX);
 
           discoveredDevices.push({
             uuid,
@@ -382,6 +387,18 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
               displayName,
               siteId: site.id,
             };
+
+            const legacy = this.accessories.find(a => a.UUID === this.api.hap.uuid.generate(deviceSerial));
+            if (legacy) {
+              // Keep the mode a power-on restores; the rest of the old context is
+              // rebuilt from the cloud.
+              accessory.context.lastActiveMode = legacy.context?.lastActiveMode;
+              this.log.warn(
+                `${displayName}: replaced the old accessory with a new one so the Home app ` +
+                'draws its tile correctly. Assign it to its room again and recreate scenes and ' +
+                'automations that used it, including any on its Dry and Fan switches.',
+              );
+            }
 
             // Create accessory handler
             const handler = new KumoThermostatAccessory(this, accessory, this.kumoAPI, this.kumoConfig.pollInterval);

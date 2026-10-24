@@ -160,3 +160,52 @@ test('transient empty zones does NOT unregister cached accessories', async () =>
     stopRetries(platform);
   }
 });
+
+// 2.0 replaces each 1.x accessory instead of swapping its Thermostat for a
+// HeaterCooler in place (iOS draws an in-place-migrated tile as a switch;
+// reproduced on a test bridge 2026-10-23). Runs the real handler, so it uses the
+// HAP fakes from helpers.
+test('upgrade: the old accessory is replaced by a new identity, keeping the power-on mode', async () => {
+  const { Service, Characteristic, makeAccessory } = require('./helpers');
+  const spies = { register: [], update: [], unregister: [] };
+  const warnings = [];
+  const api = makeApi(spies);
+  api.hap.Service = Service;
+  api.hap.Characteristic = Characteristic;
+  api.platformAccessory = function PlatformAccessory(displayName, uuid) {
+    const acc = makeAccessory(displayName, SERIAL);
+    acc.UUID = uuid;
+    acc.context = {};
+    return acc;
+  };
+  const config = {
+    name: 'test', platform: 'KumoV3', username: 'user@example.com', password: 'secret',
+    disablePolling: true,
+  };
+  const log = { ...makeLog(), warn: (m) => warnings.push(m) };
+  const platform = new KumoV3Platform(log, config, api);
+  // Any KumoAPI call the handler or discovery makes is a harmless no-op.
+  platform.kumoAPI = new Proxy({
+    login: async () => true,
+    getSites: async () => [SITE],
+    getZones: async () => [ZONE],
+    startStreaming: async () => true,
+  }, { get: (t, k) => (k in t ? t[k] : () => undefined) });
+  const old = { UUID: `uuid-${SERIAL}`, displayName: 'Living room', context: { lastActiveMode: 'heat' } };
+  platform.accessories = [old];
+  try {
+    await platform.discoverDevices();
+    const [[, , [added]]] = spies.register;
+    assert.strictEqual(added.UUID, `uuid-${SERIAL}:heatercooler`, 'new identity');
+    assert.strictEqual(added.context.lastActiveMode, 'heat', 'power-on mode carried over');
+    assert.deepStrictEqual(spies.unregister.map(([, , accs]) => accs.map(a => a.UUID)), [[old.UUID]],
+      'the old accessory is retired');
+    assert.ok(warnings.some((m) => /replaced the old accessory/.test(m)), 'the owner is told what to redo');
+  } finally {
+    stopRetries(platform);
+    for (const h of platform.accessoryHandlers) {
+      h.destroy?.();
+    }
+    platform.kumoAPI = { destroy: () => {} };
+  }
+});

@@ -230,22 +230,10 @@ export class KumoThermostatAccessory {
 
     // A ductless mini-split is a HeaterCooler, not a Thermostat: power (`Active`) is
     // separate from the heat/cool/auto mode, and the current state has a real IDLE.
-    // Accessories cached by 1.x carry a Thermostat service. Remove it, or the unit
-    // shows two competing climate tiles. HomeKit automations bound to the old
-    // thermostat controls stop working and must be recreated (the Dry/Fan switches
-    // keep their subtypes, so automations on those survive).
-    const staleThermostat = this.accessory.getService(this.platform.Service.Thermostat);
-    if (staleThermostat) {
-      this.accessory.removeService(staleThermostat);
-      this.platform.log.info(
-        `${accessory.context.device.displayName}: migrated Thermostat -> HeaterCooler. ` +
-        'HomeKit automations and scenes that controlled this thermostat must be recreated.',
-      );
-    }
-
+    // 1.x accessories carried a Thermostat; 2.0 replaces them with new accessories
+    // rather than swapping the service in place (platform.ts discovery says why).
     this.service = this.accessory.getService(this.platform.Service.HeaterCooler) ||
       this.accessory.addService(this.platform.Service.HeaterCooler);
-    this.moveTileServiceFirst();
 
     this.service.setCharacteristic(
       this.platform.Characteristic.Name,
@@ -419,8 +407,8 @@ export class KumoThermostatAccessory {
     }
 
     // Dry and fan-only have no HeaterCooler mode, so each stays a Switch on units
-    // that support it. Shown by default (hide via config): they're the only
-    // controls whose HomeKit automations survive the move from Thermostat.
+    // that support it. Shown by default (hide via config): the HeaterCooler can't
+    // select either mode.
     if (profile.hasModeVent && this.platform.kumoConfig?.showFanOnlySwitch !== false) {
       this.setupFanOnlySwitch();
     } else {
@@ -791,28 +779,6 @@ export class KumoThermostatAccessory {
     if (!existing) {
       this.publishStructureChange();
     }
-  }
-
-  /**
-   * Put the HeaterCooler first after AccessoryInformation. On a unit upgraded from
-   * 1.x it's added after the cached Dry and Fan Only switches, and the Home app drew
-   * the combined tile as a switch ("All Off"), even with the HeaterCooler marked
-   * primary and the switches linked to it. 1.x's Thermostat came first and drew
-   * correctly. Only the array order changes: hap-nodejs keys instance IDs by service
-   * type and subtype, so automations bound to the switches are unaffected.
-   */
-  private moveTileServiceFirst(): void {
-    const services = (this.accessory as { services?: Service[] }).services;
-    if (!Array.isArray(services)) {
-      return;
-    }
-    const from = services.indexOf(this.service);
-    const to = services.findIndex((s) => s.UUID === this.platform.Service.AccessoryInformation.UUID) + 1;
-    if (from <= to) {
-      return;
-    }
-    services.splice(from, 1);
-    services.splice(to, 0, this.service);
   }
 
   /**

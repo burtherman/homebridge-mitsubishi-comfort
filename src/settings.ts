@@ -1,5 +1,8 @@
 export const PLATFORM_NAME = 'KumoV3';
 export const PLUGIN_NAME = 'homebridge-mitsubishi-comfort';
+// Appended to the serial for 2.0 accessory UUIDs (platform.ts says why). Changing it
+// replaces every accessory again.
+export const ACCESSORY_UUID_SUFFIX = ':heatercooler';
 export const API_BASE_URL = 'https://app-prod.kumocloud.com/v3';
 export const SOCKET_BASE_URL = 'https://socket-prod.kumocloud.com';
 // The LEGACY v2 cloud API — pykumo / Home Assistant's data source. Its login
@@ -40,8 +43,8 @@ export interface KumoConfig {
   // ---- HomeKit display options (2.0) ----
   // Dry and fan-only have no HeaterCooler mode, so each is a separate Switch on units
   // whose profile supports it. Shown by default (their on/off follows the unit's
-  // real mode; the plugin never turns them on): they're the only controls whose
-  // automations survive the 2.0 move from Thermostat to HeaterCooler. Set false to hide.
+  // real mode; the plugin never turns them on): the HeaterCooler can't select either
+  // mode. Set false to hide.
   showDrySwitch?: boolean;
   showFanOnlySwitch?: boolean;
   // Indoor humidity as a HumiditySensor service (HeaterCooler has no humidity
