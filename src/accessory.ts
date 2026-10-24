@@ -664,7 +664,7 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * "Fan Auto": on while the unit's fan speed is auto. On sends auto; off returns to
+   * "Fan Auto": on while the unit is running with its fan speed on auto. On sends auto; off returns to
    * the last fixed speed (lastManualFan). Both go through the same queue as
    * TargetFanState, so the switch follows the fan's rules: it rides along with a
    * power-on, is dropped with an off, and isn't sent alone to an off unit.
@@ -698,9 +698,19 @@ export class KumoThermostatAccessory {
     this.fanAutoService = null;
   }
 
+  /**
+   * Off while the unit is off, whatever its stored fan speed: the Home app reads any
+   * switch that's on as the unit being on ("powered on" under the temperature on the
+   * Home view, 2026-10-23). Same rule as the Dry and Fan Only switches.
+   */
+  private isFanAutoActive(status: DeviceStatus | null): boolean {
+    return status !== null && this.mapToActive(status) === this.platform.Characteristic.Active.ACTIVE &&
+      normalizeFanSpeed(status.fanSpeed) === 'auto';
+  }
+
   async getFanAutoOn(): Promise<CharacteristicValue> {
     this.assertReachable();
-    return normalizeFanSpeed(this.currentStatus?.fanSpeed) === 'auto';
+    return this.isFanAutoActive(this.currentStatus);
   }
 
   async setFanAutoOn(value: CharacteristicValue): Promise<void> {
@@ -2486,7 +2496,7 @@ export class KumoThermostatAccessory {
       this.fanService.updateCharacteristic(
         C.TargetFanState, known === 'auto' ? C.TargetFanState.AUTO : C.TargetFanState.MANUAL);
     }
-    this.fanAutoService?.updateCharacteristic(C.On, known === 'auto');
+    this.fanAutoService?.updateCharacteristic(C.On, this.isFanAutoActive(this.currentStatus));
     this.fanService.updateCharacteristic(C.RotationSpeed, this.fanSpeedToRotation(speed));
     if (this.currentStatus) {
       this.fanService.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));

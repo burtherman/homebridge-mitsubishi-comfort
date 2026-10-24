@@ -337,6 +337,16 @@ test('Fan Auto on sends auto; off returns to the last fixed speed', async () => 
   assert.deepStrictEqual(sent, [{ fanSpeed: 'auto' }, { fanSpeed: 'powerful' }]);
 });
 
+test('Fan Auto is off while the unit is off, even with its fan on auto', () => {
+  // On would read as the unit being on: the Home view showed "powered on" (2026-10-23).
+  const { accessory, handler, applyProfile } = makeHarness();
+  applyProfile(profile());
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0, fanSpeed: 'auto' }));
+  assert.strictEqual(fanAutoSwitch(accessory).getCharacteristic(C.On).value, false);
+  handler.updateFromZone(zone({ operationMode: 'cool', power: 1, fanSpeed: 'auto' }));
+  assert.strictEqual(fanAutoSwitch(accessory).getCharacteristic(C.On).value, true);
+});
+
 test('Fan Auto on an off unit is not sent, and the switch goes back off', async () => {
   const { accessory, handler, sent, applyProfile } = makeHarness();
   applyProfile(profile());

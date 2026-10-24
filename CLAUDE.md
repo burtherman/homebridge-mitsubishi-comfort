@@ -190,7 +190,7 @@ schema, release).
 | FilterMaintenance.FilterChangeIndication | displayConfig.filter | Linked to the HeaterCooler |
 | Model (AccessoryInformation) | modelNumber | Set once from streaming |
 | Switch "Fan Only" (On) | operationMode === 'vent' && power === 1 | Separate `Switch` (subtype `fan-only`); ON sends `vent`, OFF sends `off`. Labelled "Fan Only" (`FAN_ONLY_SWITCH_NAME`; see `nameSwitch`) |
-| Switch "Fan Auto" (On) | fanSpeed === 'auto' | Separate `Switch` (subtype `fan-auto`), only with `hasFanSpeedAuto` and `showFanAutoSwitch !== false`. Same queue as TargetFanState (`queueIntent({ fanAuto })`): ON sends auto, OFF restores `lastManualFan`; not sent alone to an off unit. Added 2026-10-23 because TargetFanState never showed in the owner's Home app (the Serin has this switch) |
+| Switch "Fan Auto" (On) | unit active (power 1, mode not off) && fanSpeed === 'auto' | Off while the unit is off: an On switch makes the Home view say "powered on". Separate `Switch` (subtype `fan-auto`), only with `hasFanSpeedAuto` and `showFanAutoSwitch !== false`. Same queue as TargetFanState (`queueIntent({ fanAuto })`): ON sends auto, OFF restores `lastManualFan`; not sent alone to an off unit. Added 2026-10-23 because TargetFanState never showed in the owner's Home app (the Serin has this switch) |
 | Switch "Dry Mode" (On) | operationMode === 'dry' && power === 1 | Separate `Switch` (subtype `dry`); ON sends `dry`, OFF sends `off`. Mutually exclusive with Fan Only |
 
 **Switch labels (2026-10-23):** inside a unit's page the Home app shows a switch LINKED to
