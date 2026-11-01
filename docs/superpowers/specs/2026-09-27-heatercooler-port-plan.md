@@ -1,8 +1,7 @@
 # 2.0: HeaterCooler, fan speed and vanes, ported from the fork
 
-**Status:** approved 2026-09-27. Stages 1–3 shipped in 1.10.4. Stages 4 (HeaterCooler core), 5 (fan
-speed) and 6 (vanes) done on branch `feat/heatercooler`, not released. Stage 7 remains before 2.0.0. README and CLAUDE.md on
-that branch already describe stage 4.
+**Status:** done. Approved 2026-09-27. Stages 1–3 shipped in 1.10.4; stages 4–7 shipped in 2.0.0
+(2.0.0-beta.1 on 2026-10-24, 2.0.0 on 2026-11-01).
 
 Stage 4 went beyond the plan: power and mode writes from one HomeKit request are combined into one
 command, and a setpoint written while off in the same burst joins the power-on command (the

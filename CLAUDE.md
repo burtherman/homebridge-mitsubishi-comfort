@@ -171,8 +171,7 @@ See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_up
 
 Each unit is a `HeaterCooler` (was `Thermostat` through 1.x). Ported from the fork
 `homebridge-mitsubishi-heatpump` (ukaratay, Apache-2.0) with attribution — see NOTICE and
-`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (stage 7 still to do:
-schema, release).
+`docs/superpowers/specs/2026-09-27-heatercooler-port-plan.md` (all stages shipped in 2.0.0).
 
 | HomeKit Characteristic | Kumo API Field | Notes |
 |----------------------|----------------|-------|
