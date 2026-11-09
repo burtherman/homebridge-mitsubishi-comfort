@@ -72,8 +72,8 @@ test('onStatusUpdate fires after a HomeKit setpoint change (setter hook)', async
   handler.updateFromZone(zone({ operationMode: 'heat', spHeat: 20 })); // seed status
   const seen = [];
   handler.onStatusUpdate((s) => seen.push(s.spHeat));
-  await handler.setHeatingThresholdTemperature(22.3);
-  assert.ok(seen.includes(22.3), `expected a listener fire with spHeat 22.3, got ${JSON.stringify(seen)}`);
+  await handler.setHeatingThresholdTemperature(22);
+  assert.ok(seen.includes(22), `expected a listener fire with spHeat 22, got ${JSON.stringify(seen)}`);
 });
 
 test('onStatusUpdate fires after a HomeKit mode change (setter hook)', async () => {

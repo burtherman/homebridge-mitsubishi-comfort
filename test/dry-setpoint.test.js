@@ -12,7 +12,7 @@
 // profile's `usesSetPointInDryMode` still gates the one place the plugin adds a dry
 // setpoint on its own: a power-on that restores dry.
 //
-// Values are on the whole-°F grid: 23.9 = 75°F, 26.7 = 80°F.
+// Values are on the whole-°F grid: 24 = 75°F, 26.5 = 80°F.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -67,8 +67,8 @@ test('in DRY the tile shows COOL with the cooling threshold at spCool', async ()
 test('in DRY the cooling threshold writes spCool, before the profile arrives too', async () => {
   const { handler, sent } = makeHarness();
   handler.updateFromZone(zone()); // no profile yet: the common startup window
-  await handler.setCoolingThresholdTemperature(23.9);
-  assert.deepStrictEqual(sent, [{ spCool: 23.9 }], 'no spHeat, and no operationMode that would leave dry');
+  await handler.setCoolingThresholdTemperature(24);
+  assert.deepStrictEqual(sent, [{ spCool: 24 }], 'no spHeat, and no operationMode that would leave dry');
 });
 
 test('power-on restoring DRY carries a same-burst spCool when the unit uses a dry setpoint', async () => {
@@ -77,10 +77,10 @@ test('power-on restoring DRY carries a same-burst spCool when the unit uses a dr
   handler.updateFromZone(zone({ operationMode: 'dry', power: 1 }));
   handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
   await Promise.all([
-    handler.setCoolingThresholdTemperature(26.7),
+    handler.setCoolingThresholdTemperature(26.5),
     handler.setActive(Characteristic.Active.ACTIVE),
   ]);
-  assert.deepStrictEqual(sent, [{ operationMode: 'dry', spCool: 26.7 }]);
+  assert.deepStrictEqual(sent, [{ operationMode: 'dry', spCool: 26.5 }]);
 });
 
 test('...but not when the profile says dry has a fixed setpoint', async () => {
@@ -89,7 +89,7 @@ test('...but not when the profile says dry has a fixed setpoint', async () => {
   handler.updateFromZone(zone({ operationMode: 'dry', power: 1 }));
   handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
   await Promise.all([
-    handler.setCoolingThresholdTemperature(26.7),
+    handler.setCoolingThresholdTemperature(26.5),
     handler.setActive(Characteristic.Active.ACTIVE),
   ]);
   assert.deepStrictEqual(sent, [{ operationMode: 'dry' }], 'a fixed-setpoint dry unit gets no spCool with its power-on');

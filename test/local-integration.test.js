@@ -191,12 +191,12 @@ test('a setpoint read that has not caught up is ignored, and a matching one appl
   const { handler } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
   await sleep(2);   // a read stamped in the command's own millisecond counts as before it
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }), Date.now());
-  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22.3, 'the old 20 is ignored');
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22, 'the old 20 is ignored');
 
-  handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 22.3, roomTemp: 25 }), Date.now());
+  handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 22, roomTemp: 25 }), Date.now());
   assert.strictEqual(await handler.getCurrentTemperature(), 25, 'the caught-up read applies');
 });
 
@@ -224,9 +224,9 @@ test('commands prefer the local path when a unit is locally reachable', async ()
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
 
-  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: 22.3 }], 'sent locally');
+  assert.deepStrictEqual(local.calls.map((c) => c.commands), [{ spHeat: 22 }], 'sent locally');
   assert.strictEqual(sendCommandCalls.length, 0, 'cloud not used');
 });
 
@@ -235,10 +235,10 @@ test('a failed local command falls back to the cloud', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
 
   assert.strictEqual(local.calls.length, 1, 'local attempted first');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }], 'then cloud');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22 }], 'then cloud');
 });
 
 test('commands skip local when the unit is not locally reachable', async () => {
@@ -246,10 +246,10 @@ test('commands skip local when the unit is not locally reachable', async () => {
   const { handler, sendCommandCalls } = makeHarness({ localClient: local });
   handler.updateFromLocal(localStatus({ operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
 
   assert.strictEqual(local.calls.length, 0, 'local not attempted');
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }], 'cloud used');
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22 }], 'cloud used');
 });
 
 // ---- where an update came from (for the mirror's startup wait) ---------------

@@ -1,32 +1,49 @@
 // Portions derived from homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0,
-// src/temperature.ts @ 83dfd18). Copied unchanged; the live observations in the
-// comments below are the fork author's, from their own units.
+// src/temperature.ts @ 83dfd18). The grid changed from 0.1°C to 0.5°C in 2.0.1
+// (see below); the 2026-07 live observations are the fork author's.
 
 /**
- * Fahrenheit-anchored setpoint quantization.
+ * Fahrenheit-anchored setpoint quantization on the 0.5°C grid the cloud accepts.
  *
  * HomeKit is Celsius-native: the Home app converts to °F only for display, and a
  * controller writing "72°F" sends whatever Celsius float its own conversion produced.
- * The units accept 0.1°C granularity (live-verified — the cloud stored a 23.3
- * setpoint exactly, never snapping to 23.5), so every whole °F has a 0.1°C
- * representation that displays back as that same whole °F. This module snaps to it.
+ * This module snaps every write to the 0.5°C value nearest the whole °F the user
+ * picked, which the Home app then displays back as that same whole °F.
  *
- * Why this is not handled by HAP props. Upstream set `minStep: 0.1` on the setpoint
- * characteristics believing that would make °F round-trip. It does not:
- * hap-nodejs applies minStep only on the OUTBOUND path (`validateUserInput`); the
- * inbound controller-write path (`validateClientSuppliedValue`) hands the float
- * through verbatim. The minStep grid also introduces IEEE-754 dirt of its own,
- * because it is anchored at `minValue` — with minValue 10 and minStep 0.1 a 72°F
- * write lands on `10 + 122 * 0.1 = 22.200000000000003`, which then leaks into
- * commands, logs and mirror signatures.
+ * Why 0.5°C. Through mid 2026 the cloud accepted 0.1°C granularity (live-verified
+ * 2026-07: it stored a 23.3 setpoint exactly), and this module used a 0.1°C grid.
+ * By November 2026 the Kumo v3 cloud rejects any setpoint that is not a multiple of
+ * 0.5°C with `400 {"error":{"commands":"invalidSpHeatIncrement"}}` (and the cool
+ * equivalent): live log 2026-11-09, 19.5 accepted, while 18.4, 18.9, 20.6, 21.2 and
+ * 21.7 (the 0.1 grid values for 65, 66, 69, 70 and 71°F) were all rejected. That
+ * left every °F setpoint not divisible by 9 unsettable from HomeKit on the cloud
+ * path. The Comfort app itself stores °F setpoints in 0.5°C steps.
  *
- * Rounding also used to live in the LAN transport only (`round1` in local-api.ts) and
- * never on the cloud path, so the same HomeKit tap stored a different value depending
- * on which transport won. Quantizing here — above both transports — makes the write
- * deterministic regardless of which one carries it.
+ * Why NEAREST, not ceiling. The 0.1 grid took the ceiling so the Comfort app, which
+ * truncates when rendering °F, and the Home app, which rounds, would agree. On a
+ * 0.5°C grid that is no longer possible: the ceiling can land up to 0.5°C (0.9°F)
+ * above the degree, which the Home app would round up to the next °F. Nearest lands
+ * within 0.25°C (0.45°F) of the degree, so the Home app (this plugin's UI) always
+ * shows the °F the user picked. The Comfort app may show one degree lower for some
+ * setpoints, as it would for any value off its own conversion table.
+ *
+ * Why this is not handled by HAP props. hap-nodejs applies minStep only on the
+ * OUTBOUND path (`validateUserInput`); the inbound controller-write path
+ * (`validateClientSuppliedValue`) hands the float through verbatim. The minStep grid
+ * also introduces IEEE-754 dirt of its own, because it is anchored at `minValue`.
+ *
+ * Quantizing here, above both transports, makes the write deterministic regardless
+ * of whether the cloud or the LAN carries it.
  */
 
-/** Half of the 0.1°C device resolution: the widest gap that is still "the same setpoint". */
+/** The setpoint resolution the Kumo v3 cloud accepts. */
+const SETPOINT_STEP_C = 0.5;
+
+/**
+ * The widest gap that is still "the same setpoint": half of the old 0.1°C
+ * resolution. Values that differ in practice differ by a whole 0.5°C step, so
+ * this only absorbs float dirt and readings from units still holding 0.1 values.
+ */
 const SETPOINT_TOLERANCE_C = 0.05;
 
 /** Guard for arithmetic on range bounds that may themselves carry float dirt. */
@@ -40,42 +57,27 @@ export function fToC(f: number): number {
   return (f - 32) * 5 / 9;
 }
 
-/**
- * The 0.1°C value a whole °F degree is stored as.
- *
- * CEILING, not rounding — this is the whole point of the module, and it is driven
- * by a measured fact about the vendor app rather than by taste.
- *
- * The Mitsubishi Comfort app TRUNCATES when it renders Celsius as Fahrenheit; the
- * Home app rounds. Confirmed live 2026-07-27: the Family Room held spCool
- * 22.200001°C, which is 71.96°F, and the Home app showed 72 while the Comfort app
- * showed 71 at the same moment. That one-degree split is the entire C/F complaint.
- *
- * Rounding to 0.1 lands up to 0.09°F BELOW the target degree (72°F → 22.2 →
- * 71.96°F), which a rounding renderer shows correctly and a truncating one shows
- * one degree low. Taking the ceiling instead lands 0 to 0.18°F ABOVE it (72°F →
- * 22.3 → 72.14°F), which is correct under BOTH: truncation floors 72.14 to 72,
- * and rounding is nowhere near the 0.5 needed to reach 73.
- *
- * Cost of the choice: at most 0.0999°C (0.18°F) warmer than the exact conversion,
- * and a stored value that differs by 0.1°C from what a round-to-0.1 writer would
- * have produced for the same degree. Both are far below anything perceptible, and
- * both apps then agree on the number.
- */
-function storedC(f: number): number {
-  const exact = fToC(f);
-  // EPS absorbs float dirt so an exactly-representable degree (68°F = 20°C) is not
-  // pushed up a whole step by a 19.999999999 intermediate.
-  const ceiled = Math.ceil(exact * 10 - EPS) / 10;
-  return Math.round(ceiled * 10) / 10; // clean one-decimal float, never 22.30000000000000004
+/** Round to the nearest 0.5°C, returning a clean float (never 22.000000000000004). */
+function toStep(c: number): number {
+  const steps = Math.round(c / SETPOINT_STEP_C + EPS);
+  return Math.round(steps * SETPOINT_STEP_C * 10) / 10;
 }
 
 /**
- * Snap a Celsius setpoint to the Celsius the units store for the nearest whole
- * Fahrenheit degree, at the 0.1°C resolution they accept.
+ * The 0.5°C value a whole °F degree is stored as: the nearest one.
  *
- * The result always displays back as the whole °F it came from, in a renderer that
- * rounds AND in one that truncates — see storedC for why that matters here.
+ * Within 0.25°C (0.45°F) of the exact conversion, so it rounds back to the same °F.
+ * Consecutive °F degrees are 0.556°C apart, more than one step, so no two degrees
+ * share a stored value.
+ */
+function storedC(f: number): number {
+  return toStep(fToC(f));
+}
+
+/**
+ * Snap a Celsius setpoint to the 0.5°C value the units store for the nearest whole
+ * Fahrenheit degree. The result always displays back as that whole °F in a
+ * renderer that rounds (the Home app).
  */
 export function quantizeSetpointC(c: number): number {
   return storedC(Math.round(cToF(c)));
@@ -84,21 +86,15 @@ export function quantizeSetpointC(c: number): number {
 /**
  * Clamp to [min,max] AFTER quantizing, staying on the °F grid.
  *
- * A plain `Math.min/Math.max` clamp would hand back the raw bound, which is usually
- * not a whole °F (the real device range 10–31°C is 50–87.8°F) and would reintroduce
- * the half-degree display drift this module exists to remove. Instead, when the
- * quantized value falls outside the range we step along the °F grid toward the
- * interior — ceil at the bottom, floor at the top — and take the first whole °F that
- * lies inside. Note the consequence at a non-whole-°F bound: a request for 88°F
- * against a 31°C max lands on 87°F (30.6°C), not on 31°C/87.8°F, because 87.8 is not
- * a °F the display can show without drift.
+ * A plain `Math.min/Math.max` clamp would hand back the raw bound, which is not
+ * necessarily the stored form of a whole °F (the real device range 10 to 31°C is
+ * 50 to 87.8°F). Instead, when the quantized value falls outside the range we step
+ * along the °F grid toward the interior (up at the bottom, down at the top) and
+ * take the first whole °F whose stored value lies inside. Against a 31°C max, 88°F
+ * stores as 31.0 and is kept; 89°F walks down to it.
  *
- * "Inside" is judged to within half the 0.1°C device resolution, not exactly. A bound
- * that is itself a whole °F — 80°F is 26.6666…°C — is stored as 26.7, which an exact
- * test would read as 0.033°C out of range and reject, making the range's own endpoint
- * unreachable. The allowance cannot loosen a bound that already sits on the 0.1°C grid
- * (every real device profile bound does): both bound and candidate are then multiples
- * of 0.1, so an out-of-range candidate misses by a full 0.1, well past the tolerance.
+ * "Inside" is judged to within SETPOINT_TOLERANCE_C, which absorbs float dirt on
+ * bounds without loosening a bound that already sits on the 0.1°C or 0.5°C grid.
  */
 export function quantizeSetpointInRange(c: number, min: number, max: number): number {
   const lo = min - SETPOINT_TOLERANCE_C;
@@ -125,20 +121,24 @@ export function quantizeSetpointInRange(c: number, min: number, max: number): nu
   }
 
   // No whole °F fits inside the range (it is narrower than 1°F, or degenerate).
-  // Fall back to the range edge itself, on the 0.1°C grid, rounded inward so the
-  // result cannot land outside the range.
+  // Fall back to a 0.5°C step inside the range, rounded inward; if none exists,
+  // the range edge itself on the 0.1°C grid.
+  const inward = step === 1
+    ? Math.ceil(min / SETPOINT_STEP_C - EPS) * SETPOINT_STEP_C
+    : Math.floor(max / SETPOINT_STEP_C + EPS) * SETPOINT_STEP_C;
+  if (inward >= lo && inward <= hi) {
+    return Math.round(inward * 10) / 10;
+  }
   return step === 1
     ? Math.ceil(min * 10 - EPS) / 10
     : Math.floor(max * 10 + EPS) / 10;
 }
 
 /**
- * True if two Celsius setpoints are the same to within half a 0.1°C step.
+ * True if two Celsius setpoints are the same to within float dirt.
  *
  * Used to decide whether a write is a real change. Values that came out of
- * quantizeSetpointC are at least 0.5°C apart when they differ (1°F ≈ 0.556°C), so the
- * exact-0.05 boundary is unreachable in practice — do not rely on which side it
- * falls, floats put |22.25 - 22.2| at 0.05000000000000071.
+ * quantizeSetpointC are at least 0.5°C apart when they differ.
  */
 export function sameSetpoint(a: number, b: number): boolean {
   return Math.abs(a - b) < SETPOINT_TOLERANCE_C;
