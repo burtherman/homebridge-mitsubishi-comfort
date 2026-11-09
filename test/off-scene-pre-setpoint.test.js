@@ -123,7 +123,7 @@ test('a scene setpoint dispatched just BEFORE the off never reaches the device',
 
 test('the same holds for the heating threshold and the captured mode', async () => {
   const { handler, sendCommandCalls } = makeHarness();
-  handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 21.2 }));
+  handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 21 }));
 
   const pSp = handler.setHeatingThresholdTemperature(25);
   const pMode = handler.setTargetHeaterCoolerState(Characteristic.TargetHeaterCoolerState.HEAT);
@@ -137,10 +137,10 @@ test('control: a setpoint with no off in the burst still sends', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'cool', spCool: 22.5 }));
 
-  await handler.setCoolingThresholdTemperature(23.9);
+  await handler.setCoolingThresholdTemperature(24);
 
   assert.strictEqual(sendCommandCalls.length, 1);
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 23.9 });
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spCool: 24 });
 });
 
 test('a drag sends only its final value', async () => {
@@ -149,7 +149,7 @@ test('a drag sends only its final value', async () => {
 
   await Promise.all([
     handler.setCoolingThresholdTemperature(23.4), // 74°F
-    handler.setCoolingThresholdTemperature(23.9), // 75°F
+    handler.setCoolingThresholdTemperature(24), // 75°F
     handler.setCoolingThresholdTemperature(24.5), // 76°F
   ]);
 

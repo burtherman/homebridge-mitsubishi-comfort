@@ -214,8 +214,8 @@ test('"AC on, cool 72" from off sends mode and setpoint as one command', async (
     handler.setTargetHeaterCoolerState(T.COOL),
   ]);
   await sleep(1700); // past the setpoint hold: nothing else may follow
-  assert.deepStrictEqual(sent, [{ operationMode: 'cool', spCool: 22.3 }]);
-  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 22.3);
+  assert.deepStrictEqual(sent, [{ operationMode: 'cool', spCool: 22 }]);
+  assert.strictEqual(await handler.getCoolingThresholdTemperature(), 22);
 });
 
 test('a setpoint written while off in an EARLIER burst is not applied at power-on', async () => {

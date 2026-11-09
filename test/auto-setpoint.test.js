@@ -12,7 +12,7 @@
 // writer is gone, so a scene re-sending a captured target can't collapse the band.
 //
 // Every write is snapped to the whole-°F grid (src/temperature.ts), so the values
-// below are chosen on it: 20 = 68°F, 21.2 = 70°F, 22.3 = 72°F, 25 = 77°F.
+// below are chosen on it: 20 = 68°F, 21 = 70°F, 22 = 72°F, 25 = 77°F.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -87,8 +87,8 @@ test('zone updates sync both threshold characteristics', async () => {
 test('the heating threshold sends spHeat only', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone());
-  await handler.setHeatingThresholdTemperature(21.2);
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 21.2 }]);
+  await handler.setHeatingThresholdTemperature(21);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 21 }]);
 });
 
 test('the cooling threshold sends spCool only', async () => {
@@ -101,23 +101,23 @@ test('the cooling threshold sends spCool only', async () => {
 test('dragging the band sends two independent commands, not a collapsed pair', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ spHeat: 20, spCool: 26 }));
-  await handler.setHeatingThresholdTemperature(21.2);
+  await handler.setHeatingThresholdTemperature(21);
   await handler.setCoolingThresholdTemperature(25);
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 21.2 }, { spCool: 25 }]);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 21 }, { spCool: 25 }]);
 });
 
 test('HEAT mode: the heating threshold is the setpoint', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'heat' }));
-  await handler.setHeatingThresholdTemperature(22.3);
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22.3 }]);
+  await handler.setHeatingThresholdTemperature(22);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spHeat: 22 }]);
 });
 
 test('COOL mode: the cooling threshold is the setpoint', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'cool' }));
-  await handler.setCoolingThresholdTemperature(22.3);
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spCool: 22.3 }]);
+  await handler.setCoolingThresholdTemperature(22);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spCool: 22 }]);
 });
 
 test('an accepted threshold write optimistically updates cached state', async () => {
@@ -130,13 +130,13 @@ test('an accepted threshold write optimistically updates cached state', async ()
 
 // ---- Whole-°F grid -------------------------------------------------------
 
-test('a 72°F write arriving as a raw Celsius float is stored as 22.3', async () => {
-  // The Home app converts 72°F to 22.2222…°C. Rounding to 0.1 gives 22.2 = 71.96°F,
-  // which the Comfort app (it truncates) shows as 71. 22.3 shows 72 in both.
+test('a 72°F write arriving as a raw Celsius float is stored as 22', async () => {
+  // The Home app converts 72°F to 22.2222…°C. The cloud only takes 0.5°C steps
+  // (invalidSpHeatIncrement otherwise); the nearest is 22.0 = 71.6°F, shown as 72.
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'cool' }));
   await handler.setCoolingThresholdTemperature((72 - 32) * 5 / 9);
-  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spCool: 22.3 }]);
+  assert.deepStrictEqual(sendCommandCalls.map((c) => c.commands), [{ spCool: 22 }]);
 });
 
 test('a write outside the unit\'s range lands on the nearest whole °F inside it', async () => {
@@ -147,7 +147,7 @@ test('a write outside the unit\'s range lands on the nearest whole °F inside it
   await handler.setCoolingThresholdTemperature(17); // at the bottom edge, not a whole °F
   await handler.setCoolingThresholdTemperature(33); // above the top
   const sent = sendCommandCalls.map((c) => c.commands.spCool);
-  assert.strictEqual(sent[0], 17.3, '17°C is 62.6°F; the first whole °F at or above 17 is 63°F = 17.3');
+  assert.strictEqual(sent[0], 17, '17°C is 62.6°F, which rounds to 63°F, stored as 17.0'); 
   assert.strictEqual(sent[1], 30, '86°F = 30°C exactly');
 });
 
@@ -179,19 +179,19 @@ test('the mode picker offers only what the unit can do', () => {
 test('threshold writes to a powered-off unit are cached, not sent', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off' }));
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
   assert.strictEqual(sendCommandCalls.length, 0,
     'no bare setpoint is sent to an off unit (would 400 modeRequiredWhenDeviceOff)');
-  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22.3, 'cached + echoed so the handle holds');
+  assert.strictEqual(await handler.getHeatingThresholdTemperature(), 22, 'cached + echoed so the handle holds');
 });
 
 test('the tile keeps the whole-°F value after HomeKit stores the raw written one', async () => {
-  // hap-nodejs stores the value as sent after onSet resolves (22.0), over the
-  // quantized echo (22.3). The plugin re-pushes on a later tick.
+  // hap-nodejs stores the value as sent after onSet resolves (22.2), over the
+  // quantized echo (22). The plugin re-pushes on a later tick.
   const { handler, accessory } = makeHarness();
   handler.updateFromZone(zone({ operationMode: 'cool' }));
-  await handler.setCoolingThresholdTemperature(22.0);
-  heaterCooler(accessory).getCharacteristic(Characteristic.CoolingThresholdTemperature).value = 22.0;
+  await handler.setCoolingThresholdTemperature(22.2);
+  heaterCooler(accessory).getCharacteristic(Characteristic.CoolingThresholdTemperature).value = 22.2;
   await new Promise((r) => setTimeout(r, 5));
-  assert.strictEqual(charValue(accessory, 'CoolingThresholdTemperature'), 22.3);
+  assert.strictEqual(charValue(accessory, 'CoolingThresholdTemperature'), 22);
 });

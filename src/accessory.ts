@@ -2703,8 +2703,9 @@ export class KumoThermostatAccessory {
   }
 
   /**
-   * Snap an inbound setpoint to the whole-°F grid, inside this unit's range, so
-   * "72°F" is stored as 22.3°C and both the Home app and the Comfort app show 72.
+   * Snap an inbound setpoint to the whole-°F grid, inside this unit's range, on
+   * the 0.5°C steps the cloud accepts, so "72°F" is stored as 22.0°C and the Home
+   * app shows 72 (the cloud 400s `invalidSpHeatIncrement` on anything finer).
    * It has to happen here: HAP applies minStep only outbound and hands a
    * controller's write through verbatim, and 1.x rounded on the LAN path only, so
    * the same tap stored a different value depending on which transport carried it.

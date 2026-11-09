@@ -118,7 +118,7 @@ test('setting a setpoint while the unit is OFF sends no command', async () => {
   // Seed an OFF status the way a streaming/poll update would.
   handler.updateFromZone(zone({ power: 0, operationMode: 'off', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(21.2);
+  await handler.setHeatingThresholdTemperature(21);
 
   // Before the fix this was 1: a bare { spHeat: 21 } that the API rejected with
   // modeRequiredWhenDeviceOff. The unit is off, so nothing should be sent.
@@ -130,11 +130,11 @@ test('setting a setpoint while OFF still echoes the value to HomeKit', async () 
   const { handler, accessory } = makeHarness();
   handler.updateFromZone(zone({ power: 0, operationMode: 'off', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(21.2);
+  await handler.setHeatingThresholdTemperature(21);
 
   const target = accessory.getService(Service.HeaterCooler)
     .getCharacteristic(Characteristic.HeatingThresholdTemperature);
-  assert.strictEqual(target.value, 21.2,
+  assert.strictEqual(target.value, 21,
     'HomeKit target temperature still reflects the requested value (slider holds)');
 });
 
@@ -142,9 +142,9 @@ test('setting a setpoint while HEATING still sends it (control)', async () => {
   const { handler, sendCommandCalls } = makeHarness();
   handler.updateFromZone(zone({ power: 1, operationMode: 'heat', spHeat: 20 }));
 
-  await handler.setHeatingThresholdTemperature(22.3);
+  await handler.setHeatingThresholdTemperature(22);
 
   assert.strictEqual(sendCommandCalls.length, 1, 'heat-mode setpoint is sent to the API');
-  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22.3 },
+  assert.deepStrictEqual(sendCommandCalls[0].commands, { spHeat: 22 },
     'sends the heat setpoint with no spurious fields');
 });
